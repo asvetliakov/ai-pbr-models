@@ -1,0 +1,5 @@
+texconv.exe
+weights
+matsynth_processed
+matsynth_category_samples
+__pycache__
