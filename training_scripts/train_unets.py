@@ -318,6 +318,7 @@ def transform_train_fn(examples):
     input_metallic = [image.convert("L") for image in examples["metallic"]]
     input_roughness = [image.convert("L") for image in examples["roughness"]]
     input_category = examples["category"]
+    input_names = examples["name"]
 
     # Load diffuse and AO maps. AO is always loaded from disk, diffuse is either loaded from disk (when sample has same albedo = diffuse) or taken from the example (when different)
     input_diffuse, input_ao = load_diffuse_and_ao(examples)
@@ -397,6 +398,7 @@ def transform_train_fn(examples):
             final_masks, dim=0
         ),  # Concatenate masks along batch dimension
         "category": examples["category"],  # keep for reference
+        "name": input_names,  # keep for reference
     }
 
 
@@ -410,6 +412,7 @@ def transform_val_fn(examples):
     input_metallic = [image.convert("L") for image in examples["metallic"]]
     input_roughness = [image.convert("L") for image in examples["roughness"]]
     input_category = examples["category"]
+    input_names = examples["name"]
 
     # Load diffuse and AO maps. AO is always loaded from disk, diffuse is either loaded from disk (when sample has same albedo = diffuse) or taken from the example (when different)
     input_diffuse, input_ao = load_diffuse_and_ao(examples)
@@ -475,6 +478,7 @@ def transform_val_fn(examples):
             final_masks, dim=0
         ),  # Concatenate masks along batch dimension
         "category": examples["category"],  # keep for reference
+        "name": input_names,  # keep for reference
     }
 
 
@@ -914,6 +918,7 @@ def do_train():
                 roughness = batch["roughness"]
                 ao = batch["ao"]
                 masks = batch["masks"]
+                names = batch["name"]
 
                 diffuse_and_normal = diffuse_and_normal.to(device, non_blocking=True)
                 normal = normal.to(device, non_blocking=True)
@@ -1042,13 +1047,16 @@ def do_train():
                             0, 1
                         )  # Clamp to [0, 1] for saving
 
-                        save_image(
-                            combined, output_path / f"{cat_name}_{batch['name'][k]}.png"
+                        save_image(combined, output_path / f"{cat_name}_{names[k]}.png")
+
+                        # Save height as 16-bit PNG, save_image() doesn't work for 16-bit images
+                        h16 = (height.squeeze(0).cpu().numpy() * 65535).astype(
+                            np.uint16
                         )
-                        save_image(
-                            height,
-                            output_path / f"{cat_name}_{batch['name'][k]}_height.png",
-                            "I;16",
+                        height_im = Image.fromarray(h16, mode="I;16")
+                        height_im.save(
+                            output_path / f"{cat_name}_{names[k]}_height.png",
+                            format="PNG",
                         )
 
                         samples_saved_per_class[cat_name] += 1
