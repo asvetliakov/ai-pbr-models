@@ -731,8 +731,8 @@ def calculate_avg(epoch_data, key="train"):
     )
 
     return (
-        epoch_data["unet_albedo"][key]["total_loss"]
-        + epoch_data["unet_maps"][key]["total_loss"]
+        epoch_data["unet_albedo"][key]["total_loss"],
+        epoch_data["unet_maps"][key]["total_loss"],
     )
 
 
@@ -766,14 +766,22 @@ def do_train():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_MAX)
     scaler = GradScaler(device.type)  # AMP scaler for mixed precision
 
-    best_val_loss = float("inf")
+    best_val_loss_albedo = float("inf")
+    best_val_loss_maps = float("inf")
     patience = 4
-    no_improvement_count = 0
+    no_improvement_count_albedo = 0
+    no_improvement_count_maps = 0
+    albedo_frozen = False
+    maps_frozen = False
 
-    output_dir = Path(f"./weights/{PHASE}/unet_albedo")
+    output_dir = Path(f"./weights/{PHASE}/unets")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(EPOCHS):
+        if albedo_frozen and maps_frozen:
+            print("Both UNet-Albedo and UNet-Maps are auto frozen, stopping training.")
+            break
+
         unet_alb.train()
         unet_maps.train()
 
@@ -965,9 +973,9 @@ def do_train():
                     key="validation",
                 )
 
-                for i in range(len(category)):
+                for k in range(len(category)):
                     # Accumulate per-class loss
-                    cat_name = CLASS_LIST[category[i].item()]  # Get the category name
+                    cat_name = CLASS_LIST[category[k].item()]  # Get the category name
 
                     if samples_saved_per_class[cat_name] < 2:
                         # Save 2 samples per class for inspection
@@ -977,33 +985,33 @@ def do_train():
                         # Save diffuse, normal, GT albedo and predicted albedo side by side
                         combined_gt = torch.cat(
                             [
-                                diffuse_and_normal[i][
-                                    :, :3
+                                diffuse_and_normal[k][
+                                    :3, ...
                                 ],  # Diffuse - first 3 channels
-                                diffuse_and_normal[i][
-                                    :, 3:
+                                diffuse_and_normal[k][
+                                    3:, ...
                                 ],  # Normal - next 3 channels
-                                albedo_gt[i],  # GT Albedo
+                                albedo_gt[k],  # GT Albedo
                                 # height[i],  # Height
-                                metallic[i],  # Metallic
-                                roughness[i],  # Roughness
-                                ao[i],  # AO
+                                metallic[k],  # Metallic
+                                roughness[k],  # Roughness
+                                ao[k],  # AO
                             ],
                             dim=2,  # Concatenate along width
                         )
                         predicted = torch.cat(
                             [
-                                diffuse_and_normal[i][
-                                    :, :3
+                                diffuse_and_normal[k][
+                                    :3, ...
                                 ],  # Diffuse - first 3 channels
-                                diffuse_and_normal[i][
-                                    :, 3:
+                                diffuse_and_normal[k][
+                                    3:, ...
                                 ],  # Normal - next 3 channels
-                                albedo_pred[i],  # Predicted Albedo
+                                albedo_pred[k],  # Predicted Albedo
                                 # height_pred[i],  # Height
-                                metallic_pred[i],  # Metallic
-                                roughness_pred[i],  # Roughness
-                                ao_pred[i],  # AO
+                                metallic_pred[k],  # Metallic
+                                roughness_pred[k],  # Roughness
+                                ao_pred[k],  # AO
                             ],
                             dim=2,  # Concatenate along width
                         )
@@ -1021,8 +1029,8 @@ def do_train():
                         # Height is saved as a separate image since it is 16-bit
                         height = torch.cat(
                             [
-                                height[i],  # Height
-                                height_pred[i],  # Predicted Height
+                                height[k],  # Height
+                                height_pred[k],  # Predicted Height
                             ],
                             dim=2,  # Concatenate along width
                         ).clamp(
@@ -1030,59 +1038,67 @@ def do_train():
                         )  # Clamp to [0, 1] for saving
 
                         save_image(
-                            combined, output_path / f"{cat_name}_{batch['name'][i]}.png"
+                            combined, output_path / f"{cat_name}_{batch['name'][k]}.png"
                         )
                         save_image(
                             height,
-                            output_path / f"{cat_name}_{batch['name'][i]}_height.png",
+                            output_path / f"{cat_name}_{batch['name'][k]}_height.png",
                             "I;16",
                         )
 
                         samples_saved_per_class[cat_name] += 1
 
         calculate_avg(epoch_data, key="train")
-        total_val_loss = calculate_avg(epoch_data, key="validation")
+        unet_albedo_total_val_loss, unet_maps_total_val_loss = calculate_avg(
+            epoch_data, key="validation"
+        )
 
         print(json.dumps(epoch_data, indent=4))
 
-        if total_val_loss < best_val_loss:
-            best_val_loss = total_val_loss
-            no_improvement_count = 0
-
-            torch.save(
-                {
-                    "epoch": epoch + 1,
-                    "unet_albedo_model_state_dict": unet_alb.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
-                    "epoch_data": epoch_data,
-                },
-                output_dir / "best_model.pt",
-            )
-
-            # Save epoch data to a JSON file
-            with open(output_dir / "best_model_stats.json", "w") as f:
-                json.dump(epoch_data, f, indent=4)
-
-            print(
-                f"Saved new best model at epoch {epoch + 1} with loss {best_val_loss:.4f}"
-            )
+        if unet_albedo_total_val_loss < best_val_loss_albedo:
+            best_val_loss_albedo = unet_albedo_total_val_loss
+            no_improvement_count_albedo = 0
         else:
-            no_improvement_count += 1
+            no_improvement_count_albedo += 1
             print(
-                f"No improvement at epoch {epoch + 1}, validation loss: {total_val_loss:.4f}"
+                f"UNet-Albedo: no improvement at epoch {epoch + 1}, validation loss: {unet_albedo_total_val_loss:.4f}"
             )
-            if no_improvement_count >= patience:
+            if no_improvement_count_albedo >= patience:
                 print(
-                    f"Early stopping at epoch {epoch + 1}, no improvement for {patience} epochs."
+                    f"UNet-Albedo: Early freezing at epoch {epoch + 1}, no improvement for {patience} epochs."
                 )
-                break
+                # Freeze UNet-Albedo parameters
+                for p in unet_alb.parameters():
+                    p.requires_grad = False
+                    p.grad = None  # Clear stale gradients
+
+                albedo_frozen = True
+
+        if unet_maps_total_val_loss < best_val_loss_maps:
+            best_val_loss_maps = unet_maps_total_val_loss
+            no_improvement_count_maps = 0
+        else:
+            no_improvement_count_maps += 1
+            print(
+                f"UNet-Maps: no improvement at epoch {epoch + 1}, validation loss: {unet_maps_total_val_loss:.4f}"
+            )
+            if no_improvement_count_maps >= patience:
+                print(
+                    f"UNet-Maps: Early freezing at epoch {epoch + 1}, no improvement for {patience} epochs."
+                )
+                # Freeze UNet-Maps parameters
+                for p in unet_maps.parameters():
+                    p.requires_grad = False
+                    p.grad = None  # Clear stale gradients
+
+                maps_frozen = True
 
         # Save checkopoint after each epoch
         torch.save(
             {
                 "epoch": epoch + 1,
                 "unet_albedo_model_state_dict": unet_alb.state_dict(),
+                "unet_maps_model_state_dict": unet_maps.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "epoch_data": epoch_data,
