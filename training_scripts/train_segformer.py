@@ -52,6 +52,7 @@ CLASS_LIST = [
 NONE_IDX = len(CLASS_LIST)  # Index for "none" category, used for safety
 CLASS_LIST_IDX_MAPPING = {name: idx for idx, name in enumerate(CLASS_LIST)}
 
+INPUT_IMAGE_SIZE = (2048, 2048)  # Input image size for training, used for resizing
 
 all_labels = []
 subset_names = stratified_splits["train_a_0"]["names"]
@@ -174,7 +175,10 @@ def transform_val(
 
 
 def synced_crop_and_resize(
-    albedo: Image.Image, normal: Image.Image, size: tuple[int, int]
+    albedo: Image.Image,
+    normal: Image.Image,
+    size: tuple[int, int],
+    resize_to: list[int],
 ) -> tuple[Image.Image, Image.Image]:
     """
     Crop and resize two images to the same size.
@@ -185,10 +189,10 @@ def synced_crop_and_resize(
     normal_crop = TF.crop(normal, i, j, h, w)  # type: ignore
 
     albedo_resize = TF.resize(
-        albedo_crop, [1024, 1024], interpolation=T.InterpolationMode.LANCZOS
+        albedo_crop, resize_to, interpolation=T.InterpolationMode.LANCZOS
     )
     normal_resize = TF.resize(
-        normal_crop, [1024, 1024], interpolation=T.InterpolationMode.BILINEAR
+        normal_crop, resize_to, interpolation=T.InterpolationMode.BILINEAR
     )
 
     # image not tensors
@@ -223,10 +227,28 @@ def make_full_image_mask(category_id: int, img_size: tuple[int, int]) -> torch.T
     return torch.from_numpy(mask_np)
 
 
+def ensure_input_size(
+    im: Image.Image, size: tuple[int, int], resample: Image.Resampling
+):
+    if im.size == size:
+        return im
+    return im.resize(size, resample)
+
+
 def transform_train_fn(examples):
     # Transform
-    transformed_albedo = [image.convert("RGB") for image in examples["basecolor"]]
-    transformed_normal = [image.convert("RGB") for image in examples["normal"]]
+    transformed_albedo = [
+        ensure_input_size(
+            image.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.LANCZOS
+        )
+        for image in examples["basecolor"]
+    ]
+    transformed_normal = [
+        ensure_input_size(
+            image.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
+        )
+        for image in examples["normal"]
+    ]
 
     # Check if there any examples with "none" category and warn if so
     if NONE_IDX in examples["category"]:
@@ -244,7 +266,9 @@ def transform_train_fn(examples):
 
     final = []
     for albedo, normal in zip(transformed_albedo, transformed_normal):
-        albedo, normal = synced_crop_and_resize(albedo, normal, size=(256, 256))
+        albedo, normal = synced_crop_and_resize(
+            albedo, normal, size=(256, 256), resize_to=[1024, 1024]
+        )
         albedo = transform_train(albedo)
         # MatSynth dataset uses OpenGL normal maps, we need to convert them to DirectX format
         # Using it here to avoid converting 4k images
@@ -268,14 +292,27 @@ def transform_train_fn(examples):
 def transform_val_fn(examples):
     # Transform
     transformed = [
-        transform_val(image.convert("RGB"), T.InterpolationMode.LANCZOS)
+        transform_val(
+            ensure_input_size(
+                image.convert("RGB"),
+                INPUT_IMAGE_SIZE,
+                resample=Image.Resampling.LANCZOS,
+            ),
+            T.InterpolationMode.LANCZOS,
+        )
         for image in examples["basecolor"]
     ]
 
     transformed_normal = [
         # MatSynth dataset uses OpenGL normal maps, we need to convert them to DirectX format
         transform_val(
-            convert_normal_to_directx_type(image.convert("RGB")),
+            convert_normal_to_directx_type(
+                ensure_input_size(
+                    image.convert("RGB"),
+                    INPUT_IMAGE_SIZE,
+                    resample=Image.Resampling.BILINEAR,
+                )
+            ),
             T.InterpolationMode.BILINEAR,
         )
         for image in examples["normal"]

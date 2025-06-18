@@ -54,6 +54,7 @@ NONE_IDX = len(CLASS_LIST)  # Index for "none" category, used for safety
 CLASS_LIST_IDX_MAPPING = {name: idx for idx, name in enumerate(CLASS_LIST)}
 METAL_IDX = CLASS_LIST_IDX_MAPPING["metal"]
 
+INPUT_IMAGE_SIZE = (2048, 2048)  # Input image size for training, used for resizing
 
 all_labels = []
 subset_names = stratified_splits["train_a_0"]["names"]
@@ -265,6 +266,14 @@ def check_none_category(examples):
         )
 
 
+def ensure_input_size(
+    im: Image.Image, size: tuple[int, int], resample: Image.Resampling
+):
+    if im.size == size:
+        return im
+    return im.resize(size, resample)
+
+
 def load_diffuse_and_ao(examples: dict) -> tuple[list[Image.Image], list[Image.Image]]:
     # Load from disk
     input_ao = []
@@ -278,8 +287,11 @@ def load_diffuse_and_ao(examples: dict) -> tuple[list[Image.Image], list[Image.I
     for name, category_idx, diffuse in zip(names, categories, diffuse):
         category = CLASS_LIST[category_idx]
         ao_path = Path(f"./matsynth_processed/{category}/{name}_ao.png")
-        image = Image.open(ao_path).convert("L")  # Load AO map as grayscale
-        input_ao.append(image)
+        ao_img = Image.open(ao_path).convert("L")  # Load AO map as grayscale
+        ao_img = ensure_input_size(
+            ao_img, INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
+        )
+        input_ao.append(ao_img)
 
         # ! Enable for Phase A+
         # Load generated diffuse if exist (many examples have same diffuse and albedo so we generated synthetic for them)
@@ -291,7 +303,9 @@ def load_diffuse_and_ao(examples: dict) -> tuple[list[Image.Image], list[Image.I
         #     diffuse_image = Image.open(diffuse_path).convert("RGB")
         #     transformed_diffuse.append(diffuse_image)
         # else:
-        diffuse = diffuse.convert("RGB")
+        diffuse = ensure_input_size(
+            diffuse.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.LANCZOS
+        )
         input_diffuse.append(diffuse)
 
     return input_diffuse, input_ao
@@ -312,11 +326,39 @@ def transform_train_fn(examples):
     # Check if there any examples with "none" category and warn if so
     check_none_category(examples)
 
-    input_albedo = [image.convert("RGB") for image in examples["basecolor"]]
-    input_normal = [image.convert("RGB") for image in examples["normal"]]
-    input_height = [image.convert("I;16") for image in examples["height"]]
-    input_metallic = [image.convert("L") for image in examples["metallic"]]
-    input_roughness = [image.convert("L") for image in examples["roughness"]]
+    # img: Image.Image = Image.open(examples["basecolor"][0])  # Use first image to get size
+    # img.convert("RGB").resize((1024, 1024), resample=Image.Resampling.LANCZOS)  # Resize to 1024x1024 for training
+
+    input_albedo = [
+        ensure_input_size(
+            image.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.LANCZOS
+        )
+        for image in examples["basecolor"]
+    ]
+    input_normal = [
+        ensure_input_size(
+            image.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
+        )
+        for image in examples["normal"]
+    ]
+    input_height = [
+        ensure_input_size(
+            image.convert("I;16"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BICUBIC
+        )
+        for image in examples["height"]
+    ]
+    input_metallic = [
+        ensure_input_size(
+            image.convert("L"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
+        )
+        for image in examples["metallic"]
+    ]
+    input_roughness = [
+        ensure_input_size(
+            image.convert("L"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
+        )
+        for image in examples["roughness"]
+    ]
     input_category = examples["category"]
     input_names = examples["name"]
 
@@ -406,11 +448,36 @@ def transform_val_fn(examples):
     # Check if there any examples with "none" category and warn if so
     check_none_category(examples)
 
-    input_albedo = [image.convert("RGB") for image in examples["basecolor"]]
-    input_normal = [image.convert("RGB") for image in examples["normal"]]
-    input_height = [image.convert("I;16") for image in examples["height"]]
-    input_metallic = [image.convert("L") for image in examples["metallic"]]
-    input_roughness = [image.convert("L") for image in examples["roughness"]]
+    input_albedo = [
+        ensure_input_size(
+            image.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.LANCZOS
+        )
+        for image in examples["basecolor"]
+    ]
+    input_normal = [
+        ensure_input_size(
+            image.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
+        )
+        for image in examples["normal"]
+    ]
+    input_height = [
+        ensure_input_size(
+            image.convert("I;16"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BICUBIC
+        )
+        for image in examples["height"]
+    ]
+    input_metallic = [
+        ensure_input_size(
+            image.convert("L"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
+        )
+        for image in examples["metallic"]
+    ]
+    input_roughness = [
+        ensure_input_size(
+            image.convert("L"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
+        )
+        for image in examples["roughness"]
+    ]
     input_category = examples["category"]
     input_names = examples["name"]
 
