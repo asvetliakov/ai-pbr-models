@@ -22,7 +22,7 @@ from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
 
 # HYPER_PARAMETERS
-BATCH_SIZE = 4  # Batch size for training
+BATCH_SIZE = 2  # Batch size for training
 EPOCHS = 10  # Number of epochs to train
 LR = 1e-4  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
@@ -567,7 +567,7 @@ def calculate_unet_albedo_loss(
     key="train",
 ) -> torch.Tensor:
     if ecpoch_data.get("unet_albedo") is None:
-        ecpoch_data[key] = {}
+        ecpoch_data["unet_albedo"] = {}
 
     if ecpoch_data["unet_albedo"].get(key) is None:
         ecpoch_data["unet_albedo"][key] = {
@@ -642,8 +642,8 @@ def calculate_unet_maps_loss(
         }
 
     # Calculate masks
-    mask_all = torch.ones_like(roughness_gt)
-    mask_metal = (masks == METAL_IDX).unsqueeze(1).float()  # (B, 1, H, W)
+    mask_all = torch.ones_like(roughness_gt, dtype=torch.bool)  # (B, 1, H, W)
+    mask_metal = (masks == METAL_IDX).unsqueeze(1)  # (B, 1, H, W)
 
     # Roughness, since every pixel is important, we use a mask of ones
     l1_rough = masked_l1(
@@ -781,12 +781,18 @@ def do_train():
         teacher_epochs = 10 if PHASE.lower() == "a" or PHASE.lower() == "a0" else 0
         # If true don't detach Unet-albedo gradients
         joint_finetune = (PHASE.lower() == "c") and (epoch >= 0.5 * EPOCHS)
+        # My RTX 5090 doesn't have enough memory for batch size 4, so using 2 with accumulation
+        accum_steps = 2
 
         epoch_data = {
             "epoch": epoch + 1,
         }
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS} - Training"):
+        optimizer.zero_grad()
+
+        for i, batch in enumerate(
+            tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS} - Training")
+        ):
             diffuse_and_normal = batch["diffuse_and_normal"]
             normal = batch["normal"]
             category = batch["category"]
@@ -866,14 +872,17 @@ def do_train():
             # Total loss
             total_loss = unet_albedo_loss + unet_maps_loss
 
-            optimizer.zero_grad()
-
             # loss.backward()
             # optimizer.step()
 
+            # ① scale down so that sum over accum_steps equals real batch gradient
+            total_loss = total_loss / accum_steps
             scaler.scale(total_loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+
+            if (i + 1) % accum_steps == 0 or (i + 1) == len(train_loader):
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
         unet_alb.eval()
         unet_maps.eval()
