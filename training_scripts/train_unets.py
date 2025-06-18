@@ -736,6 +736,11 @@ def calculate_avg(epoch_data, key="train"):
     )
 
 
+def to_rgb(x):
+    # x: (1, H, W) → (3, H, W) by repeating the gray channel
+    return x.repeat(3, 1, 1)
+
+
 # Training loop
 def do_train():
     train_ds, val_ds = load_my_dataset()
@@ -993,9 +998,9 @@ def do_train():
                                 ],  # Normal - next 3 channels
                                 albedo_gt[k],  # GT Albedo
                                 # height[i],  # Height
-                                metallic[k],  # Metallic
-                                roughness[k],  # Roughness
-                                ao[k],  # AO
+                                to_rgb(metallic[k]),  # Metallic
+                                to_rgb(roughness[k]),  # Roughness
+                                to_rgb(ao[k]),  # AO
                             ],
                             dim=2,  # Concatenate along width
                         )
@@ -1009,9 +1014,9 @@ def do_train():
                                 ],  # Normal - next 3 channels
                                 albedo_pred[k],  # Predicted Albedo
                                 # height_pred[i],  # Height
-                                metallic_pred[k],  # Metallic
-                                roughness_pred[k],  # Roughness
-                                ao_pred[k],  # AO
+                                to_rgb(metallic_pred[k]),  # Metallic
+                                to_rgb(roughness_pred[k]),  # Roughness
+                                to_rgb(ao_pred[k]),  # AO
                             ],
                             dim=2,  # Concatenate along width
                         )
