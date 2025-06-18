@@ -265,18 +265,19 @@ def check_none_category(examples):
         )
 
 
-def load_diffuse_and_ao(
-    examples: list[dict],
-) -> tuple[list[Image.Image], list[Image.Image]]:
+def load_diffuse_and_ao(examples: dict) -> tuple[list[Image.Image], list[Image.Image]]:
     # Load from disk
     input_ao = []
     # Either load from disk (if exist) or use existing diffuse
     input_diffuse = []
 
-    for example in examples:
-        category_idx = example["category"]
+    categories = examples["category"]
+    names = examples["name"]
+    diffuse = examples["diffuse"]
+
+    for name, category_idx, diffuse in zip(names, categories, diffuse):
         category = CLASS_LIST[category_idx]
-        ao_path = Path(f"./matsynth_processed/{category}/{example["name"]}_ao.png")
+        ao_path = Path(f"./matsynth_processed/{category}/{name}_ao.png")
         image = Image.open(ao_path).convert("L")  # Load AO map as grayscale
         input_ao.append(image)
 
@@ -290,7 +291,7 @@ def load_diffuse_and_ao(
         #     diffuse_image = Image.open(diffuse_path).convert("RGB")
         #     transformed_diffuse.append(diffuse_image)
         # else:
-        diffuse = example["diffuse"].convert("RGB")
+        diffuse = diffuse.convert("RGB")
         input_diffuse.append(diffuse)
 
     return input_diffuse, input_ao
@@ -328,6 +329,7 @@ def transform_train_fn(examples):
     final_metallic = []
     final_roughness = []
     final_ao = []
+    final_normal = []
 
     final_masks = []
 
@@ -363,6 +365,7 @@ def transform_train_fn(examples):
         normal = transform_train_input(convert_normal_to_directx_type(normal))
         # Concatenate albedo and normal along the channel dimension
         final_diffuse_and_normal.append(torch.cat((diffuse, normal), dim=0))  # type: ignore
+        final_normal.append(normal)
 
         albedo = transform_train_gt(albedo)
         final_albedo.append(albedo)
@@ -385,12 +388,12 @@ def transform_train_fn(examples):
     return {
         "diffuse_and_normal": final_diffuse_and_normal,
         "height": final_hieght,
-        "albedo": albedo,
-        "normal": normal,
+        "albedo": final_albedo,
+        "normal": final_normal,
         "metallic": final_metallic,
         "roughness": final_roughness,
         "ao": final_ao,
-        "masks": torch.cat(
+        "masks": torch.stack(
             final_masks, dim=0
         ),  # Concatenate masks along batch dimension
         "category": examples["category"],  # keep for reference
@@ -419,6 +422,7 @@ def transform_val_fn(examples):
     final_roughness = []
     final_ao = []
     final_masks = []
+    final_normal = []
 
     for diffuse, normal, albedo_gt, height, metallic, roughness, ao, category in zip(
         input_diffuse,
@@ -439,6 +443,7 @@ def transform_val_fn(examples):
         final_diffuse_and_normal.append(
             torch.cat((diffuse, normal), dim=0)  # type: ignore
         )
+        final_normal.append(normal)
 
         albedo = transform_validation_gt(albedo_gt, T.InterpolationMode.LANCZOS)
         final_albedo.append(albedo)
@@ -461,12 +466,12 @@ def transform_val_fn(examples):
     return {
         "diffuse_and_normal": final_diffuse_and_normal,
         "height": final_height,
-        "albedo": albedo,
-        "normal": normal,
+        "albedo": final_albedo,
+        "normal": final_normal,
         "metallic": final_metallic,
         "roughness": final_roughness,
         "ao": final_ao,
-        "masks": torch.cat(
+        "masks": torch.stack(
             final_masks, dim=0
         ),  # Concatenate masks along batch dimension
         "category": examples["category"],  # keep for reference
@@ -505,7 +510,7 @@ def load_my_dataset() -> tuple[Dataset, Dataset]:
             names=CLASS_LIST_WITH_NONE,
             num_classes=len(CLASS_LIST_WITH_NONE),
         ),
-        new_fingerprint="my_category_mapping",
+        new_fingerprint="my_category_mapping_v2",
     )
 
     # Select our prepared indexes for train & val datasets
@@ -658,13 +663,15 @@ def calculate_unet_maps_loss(
     ecpoch_data["unet_maps"][key]["rough_loss"] += loss_rough.item()
 
     # Metal
-    loss_metal = F.binary_cross_entropy_with_logits(
-        metallic_pred,
-        metallic_gt,
-        weight=mask_metal,  # Zeros out non-metal regions
-        reduction="sum",
-    )
-    loss_metal = loss_metal / mask_metal.sum().clamp(min=1.0)  # Avoid division by zero
+    # loss_metal = F.binary_cross_entropy_with_logits(
+    #     metallic_pred,
+    #     metallic_gt,
+    #     weight=mask_metal,  # Zeros out non-metal regions
+    #     reduction="sum",
+    # )
+    # loss_metal = loss_metal / mask_metal.sum().clamp(min=1.0)  # Avoid division by zero
+    # Phase A0
+    loss_metal = masked_l1(metallic_pred, metallic_gt, material_mask=mask_all)
     ecpoch_data["unet_maps"][key]["metal_loss"] += loss_metal.item()
 
     # AO, since every pixel is important, we use a mask of ones
