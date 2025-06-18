@@ -1,59 +1,20 @@
 # 🌄 End‑to‑End PBR Conversion Plan — _No‑ViT, Multi‑Mask SegFormer_
 
-_(Version 4.1 · 16 Jun 2025)_
-
-Below you will find:
-
-1.  Directory layout & pre‑flight scripts
-2.  Phase ladder (A0 → D) with **exact hyper‑params**
-3.  Training logic for **SegFormer masks** and **UNet‑FiLM conditioning**
-4.  Validation gates & logging keys
-
----
-
-## 0️⃣ Directory Layout
-
-project*root/
-│
-├── data/
-│ ├── MatSynth/ # original MatSynth
-│ ├── Skyrim/ # cleaned Skyrim
-│ ├── duplicates/ # identical albedo=diffuse pairs
-│ └── splits/ # JSON split files (see below)
-│
-├── scripts/ # helper scripts (listed later)
-├── checkpoints/ # *.pth after every phase
-└── train*logs/ # one *.log per (model, phase)
-
-## 🔧 One‑Time Pre‑Flight
-
-| Step | Script                    | Purpose                                                                                                        |
-| ---- | ------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| 1    | `find_identical_pairs.py` | move 4 500 identical pairs to `duplicates/`                                                                    |
-| 2    | `verify_black_diffuse.py` | audit conversion errors                                                                                        |
-| 3    | `synth_diffuse_v2.py`     | overwrite those duplicates with **synthetic diffuse**                                                          |
-| 4    | `filter_materials.py`     | drop plastic, misc, terracotta; merge concrete & marble → stone; (optionally) merge plaster→stone if < 50 imgs |
-| 5    | `make_splits.py`          | output `MatSynth_train.json / val.json`, `Skyrim_train.json / val.json` (5 % per domain into val)              |
+_(Version 4.5 · 18 Jun 2025)_
 
 ---
 
 ## MatSynth category hygiene
 
-| Category                                                 | Action & Reason                                                                                        |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| **plastic**                                              | **Drop** – anachronistic.                                                                              |
-| **concrete**                                             | **Merge → stone** – roughness/height similar; makes SegFormer’s job easier.                            |
-| **marble**                                               | If Skyrim mod pack has no marble, **merge into stone**; else keep (rare indoor pillars).               |
-| **plaster**                                              | Skyrim has some interior wall stucco ⇒ _keep_ (fold into “stone” only if you truly have < 20 samples). |
-| **terracotta**                                           | Very rare → **drop**.                                                                                  |
-| **misc**                                                 | Contains heterogeneous, often modern designs → **drop**.                                               |
-| **ceramic, fabric, ground, leather, metal, wood, stone** | **Keep**. Add `fur` if you have ≥ 100 samples.                                                         |
-
-## 🗂 Class List (after merges)
-
-["wood", "stone", "metal", "fabric", "leather", "ground", "ceramic",
-"fur"] # add only if ≥100 imgs
-NUM_CLASSES = len(list)
+| Category                                                 | Action & Reason                                                                          |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| **plastic**                                              | **Drop** – anachronistic.                                                                |
+| **concrete**                                             | **Merge → stone** – roughness/height similar; makes SegFormer’s job easier.              |
+| **marble**                                               | If Skyrim mod pack has no marble, **merge into stone**; else keep (rare indoor pillars). |
+| **plaster**                                              | **Drop**                                                                                 |
+| **terracotta**                                           | Very rare → **drop**.                                                                    |
+| **misc**                                                 | Contains heterogeneous, often modern designs → **drop**.                                 |
+| **ceramic, fabric, ground, leather, metal, wood, stone** | **Keep**. Add `fur` if you have ≥ 100 samples.                                           |
 
 ---
 
@@ -256,22 +217,6 @@ _Summary_:
 
 ---
 
-## 📜 Logging Keys (every epoch)
-
-```json
-{
-    "epoch": 18,
-    "mat_val_loss": 0.0814,
-    "sky_val_loss": 0.0897,
-    "seg_iou_mat": 0.72,
-    "seg_iou_sky": 0.58,
-    "lpips_alb": 0.208,
-    "masked_l1_maps": 0.042
-}
-```
-
----
-
 ## 🤖 Personal Recommendations
 
 -   GPU memory – keep per‑map Phase D jobs under 12 GB by --channels_last and torch.compile (PyTorch 2.1).
@@ -365,7 +310,7 @@ Phase D : none (+Photometric 0.5× Sky)
 | **Colour‑jitter** _(±5 % hue/sat)_         | Prevents the network from over‑fitting to a single white‑balance in MatSynth.                                       | A, B, C                                               | **MatSynth only** (Skyrim already gets Photometric).                                             |
 | **Composite crops** (2‑ & 4‑patch mosaics) | **Critical**: they are your _only_ source of _pixel‑accurate multi‑material masks_ for SegFormer during Phases A–C. | A (30 % / 15 %)<br>B (30 % / 15 %)<br>C (20 % / 10 %) | MatSynth only. For composite crops take random samples from whole dataset not just current batch |
 
-### 🖼️ How cropping works vs. composite mosaics — cleared up once and for all
+### 🖼️ How cropping works vs. composite mosaics
 
 | Term                   | What you actually do                                                                                                                                                                   | Where it happens                                                                 |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
@@ -447,48 +392,9 @@ else:
 
 ---
 
-## 🧮 Loss Functions
-
-| Model          | Loss                                                                           |
-| -------------- | ------------------------------------------------------------------------------ |
-| SegFormer      | `CrossEntropy2d` (MatSynth) + _masked CE_ on pseudo‑label (Skyrim, conf > 0.8) |
-| UNet‑Albedo    | `masked_L1` + 0.1·LPIPS                                                        |
-| UNet‑Maps      | `masked_L1` (w_fg = 3) per‑channel                                             |
-| All val phases | record `mat_val_loss`, `sky_val_loss` in log JSON                              |
-
 ## LPIPS
-
--   Always compute on validation set, log as 'lpips_val'.
-
-```python
-# inside Phase A-Alb-Syn
-loss = masked_l1(...) + 0.05 * lpips_fn(2*pred-1, 2*target-1)
-
-# all other phases
-loss = masked_l1(...)
-lpips_val = lpips_fn(2*val_pred-1, 2*val_target-1).mean().item()
-log["lpips_val"] = lpips_val
-```
 
 | Usage style                                          | Pros                                                                        | Cons                                                           | Recommended spot                                                                          |
 | ---------------------------------------------------- | --------------------------------------------------------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | **Validation‑only metric**                           | • Zero extra back‑prop cost.<br>• Simpler to code.                          | • Model optimises purely for L1/L2 → can look overly smooth.   | **All phases** (always log `lpips_val`).                                                  |
 | **Small‑weight training term** (e.g. `0.05 × LPIPS`) | • Encourages sharper, perceptually pleasing results (important for albedo). | Adds one extra VGG forward pass per mini‑batch (≈8 ms on 1 K). | **Phase A‑Alb‑Syn only** — that’s where you fight baked lighting and “identity shortcut.” |
-
-If simplicity is your priority:
-
-```python
-# training loss (no LPIPS)
-loss_alb = masked_l1(pred_alb, gt_alb, mask)
-```
-
-If you want the perceptual boost in Phase A‑Alb‑Syn:
-
-```python
-# enable once
-lpips_loss = 0.05 * lpips_fn(2*pred_alb-1, 2*gt_alb-1)  # tensors in [-1,1]
-loss_alb   = masked_l1(...) + lpips_loss
-Either way, always compute lpips_val on the validation set and record it in your train_logs/*.log for model selection.
-```
-
----
