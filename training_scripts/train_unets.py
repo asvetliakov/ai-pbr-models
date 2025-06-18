@@ -1060,7 +1060,7 @@ def do_train():
                         output_path.mkdir(parents=True, exist_ok=True)
 
                         # Save diffuse, normal, GT albedo and predicted albedo side by side
-                        combined_gt = torch.cat(
+                        visual_sample_gt = torch.cat(
                             [
                                 diffuse_and_normal[k][
                                     :3, ...
@@ -1076,7 +1076,7 @@ def do_train():
                             ],
                             dim=2,  # Concatenate along width
                         )
-                        predicted = torch.cat(
+                        visual_sample_predicted = torch.cat(
                             [
                                 diffuse_and_normal[k][
                                     :3, ...
@@ -1093,10 +1093,10 @@ def do_train():
                             dim=2,  # Concatenate along width
                         )
 
-                        combined = torch.cat(
+                        visual_sample = torch.cat(
                             [
-                                combined_gt,  # GT
-                                predicted,  # Predicted
+                                visual_sample_gt,  # GT
+                                visual_sample_predicted,  # Predicted
                             ],
                             dim=1,  # Concatenate along height
                         ).clamp(
@@ -1104,7 +1104,7 @@ def do_train():
                         )  # Clamp to [0, 1] for saving
 
                         # Height is saved as a separate image since it is 16-bit
-                        height = torch.cat(
+                        visual_sample_height = torch.cat(
                             [
                                 height[k],  # Height
                                 height_pred[k],  # Predicted Height
@@ -1114,12 +1114,14 @@ def do_train():
                             0, 1
                         )  # Clamp to [0, 1] for saving
 
-                        save_image(combined, output_path / f"{cat_name}_{names[k]}.png")
+                        save_image(
+                            visual_sample, output_path / f"{cat_name}_{names[k]}.png"
+                        )
 
                         # Save height as 16-bit PNG, save_image() doesn't work for 16-bit images
-                        h16 = (height.squeeze(0).cpu().numpy() * 65535).astype(
-                            np.uint16
-                        )
+                        h16 = (
+                            visual_sample_height.squeeze(0).cpu().numpy() * 65535
+                        ).astype(np.uint16)
                         height_im = Image.fromarray(h16, mode="I;16")
                         height_im.save(
                             output_path / f"{cat_name}_{names[k]}_height.png",
