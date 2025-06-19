@@ -8,8 +8,20 @@ import random
 import PIL.Image as Image
 import json
 
-with open("./matsynth_final_indexes.json", "r") as f:
+"""
+Prepare the Matsynth dataset for training by generating AO maps, diffuse maps, converting normals to DirectX format and resizing images.
+Requires around 200GB of disk space for the processed dataset.
+"""
+
+BASE_DIR = Path(__file__).resolve().parent
+
+OUT_DIR = Path(BASE_DIR / "../matsynth_processed").resolve()
+
+with open(BASE_DIR / "matsynth_final_indexes.json", "r") as f:
     index_data = json.load(f)
+
+with open(BASE_DIR / "matsynth_name_index_map.json", "r") as f:
+    name_index_map = json.load(f)
 
 
 # def height_to_parallax_png(h_path: Path, p_path: Path, gain: float = 1.0):
@@ -97,6 +109,37 @@ def lambert(alb, nrm):
     return alb * (0.4 + 0.6 * shade)
 
 
+def convert_normal_to_directx_and_renorm(
+    normal: Image.Image, size=(2048, 2048)
+) -> Image.Image:
+    """
+    1) Resize with bilinear (to avoid ringing)
+    2) Flip G channel (OpenGL → DirectX)
+    3) Re-normalize each (R,G,B) vector to unit length
+    4) Remap back to 8-bit [0,255] RGB
+    """
+    # 1) resize
+    resized = normal.convert("RGB").resize(size, resample=Image.Resampling.BILINEAR)
+
+    # 2) to float in [0,1]
+    arr = np.array(resized, dtype=np.float32) / 255.0
+    # flip G
+    arr[..., 1] = 1.0 - arr[..., 1]
+
+    # 3) remap to [-1,1]
+    vec = arr * 2.0 - 1.0
+    # compute length per pixel
+    norm = np.linalg.norm(vec, axis=2, keepdims=True)
+    vec = vec / (norm + 1e-6)
+
+    # 4) back to [0,1]
+    out = (vec + 1.0) * 0.5
+    # to 8-bit
+    out8 = (out * 255.0).clip(0, 255).astype(np.uint8)
+
+    return Image.fromarray(out8, mode="RGB")
+
+
 def screen_ao(height):
     if height is None:
         return 1
@@ -156,7 +199,7 @@ def colour_cast(img):
 def process_batch(indexes, dataset: Dataset):
     batch_dataset = dataset.select(indexes)
 
-    for i, item in enumerate(batch_dataset):
+    for item in batch_dataset:
         name = item["name"]  # type: ignore
         height: Image.Image = item["height"]  # type: ignore
         albedo: Image.Image = item["basecolor"]  # type: ignore
@@ -164,25 +207,51 @@ def process_batch(indexes, dataset: Dataset):
         roughness: Image.Image = item["roughness"]  # type: ignore
         metallic: Image.Image = item["metallic"]  # type: ignore
         specular: Image.Image = item["specular"]  # type: ignore
+        metadata: dict = item["metadata"]  # type: ignore
 
-        albedo = albedo.resize((2048, 2048), resample=Image.Resampling.LANCZOS)
+        print(f"Processing {name}")
 
-        height = height.resize((2048, 2048), resample=Image.Resampling.BICUBIC)
-        normal = normal.resize((2048, 2048), resample=Image.Resampling.BILINEAR)
-        roughness = roughness.resize((2048, 2048), resample=Image.Resampling.BILINEAR)
-        metallic = metallic.resize((2048, 2048), resample=Image.Resampling.BILINEAR)
-        specular = specular.resize((2048, 2048), resample=Image.Resampling.BILINEAR)
+        matsynth_index = name_index_map["name_to_index"].get(name, None)
+        if matsynth_index is None:
+            print(f" - !!! Skipping {name} - matsynth index not found")
+            continue
+
+        # NaN for most samples
+        metadata["physical_size"] = 0
+        metadata["original_matsynth_index"] = matsynth_index
+
+        # Resize images to 2048x2048 (to avoid wasting time resizing them on-fly when training) and make sure they are in the correct format (they should be already but for safety)
+        albedo = albedo.convert("RGB").resize(
+            (2048, 2048), resample=Image.Resampling.LANCZOS
+        )
+
+        height = height.convert("I;16").resize(
+            (2048, 2048), resample=Image.Resampling.BICUBIC
+        )
+
+        # ! Make sure we convert normal maps to DirectX format before using it for diffuse generation
+        normal = convert_normal_to_directx_and_renorm(normal.convert("RGB"))
+
+        roughness = roughness.convert("L").resize(
+            (2048, 2048), resample=Image.Resampling.BILINEAR
+        )
+        metallic = metallic.convert("L").resize(
+            (2048, 2048), resample=Image.Resampling.BILINEAR
+        )
+        specular = specular.convert("RGB").resize(
+            (2048, 2048), resample=Image.Resampling.BILINEAR
+        )
 
         category = index_data["new_category_mapping"].get(name, None)
         if category is None:
-            print(f"!!! Skipping {name} ({i}) - category not found")
+            print(f" - !!! Skipping {name} - category not found")
             continue
 
-        out_path = Path(f"./matsynth_processed/{category}")
+        out_path = Path(OUT_DIR / category)
         out_path.mkdir(parents=True, exist_ok=True)
 
         # Generate AO map based on height map data
-        print(f"Generating AO for {name} ({i})")
+        # print(f"{name} - Generating AO")
         roughness_arr = np.asarray(roughness.convert("L"), dtype=np.float32) / 255.0
         # default, ceramic, metal
         low_sigma = 15
@@ -211,28 +280,45 @@ def process_batch(indexes, dataset: Dataset):
             hi_blend=hi_blend,
         )
 
+        # if matsynth_index in index_data["same_diffuse_albedo_indexes"]:
+        # ! Generated diffuse is better for my use case. In MatSynth diffuse textures lighting is often applied only to specific parts of
+        # ! the texture (like metallic parts) while the rest of the texture is unshaded
+        # print(f"{name} - Generating diffuse")
+        alb_arr = np.asarray(albedo.convert("RGB"), dtype=np.float32) / 255.0
+        normal_arr = np.asarray(normal.convert("RGB"), dtype=np.float32) / 255.0
+        height_arr = np.asarray(height.convert("I;16"), dtype=np.float32) / 65535.0
+        metallic_arr = np.asarray(metallic.convert("L"), dtype=np.float32) / 255.0
+        # Specular map in MatSynth is in RGB format with PBR specularity
+        specular_arr = np.asarray(specular.convert("RGB"), dtype=np.float32) / 255.0
+
+        synth = lambert(alb_arr, normal_arr)
+        synth *= screen_ao(height_arr)
+        synth += specular_highlight(specular_arr, roughness_arr, metallic_arr)
+        synth = colour_cast(synth)
+
+        diffuse = Image.fromarray(
+            (np.clip(synth, 0, 1) * 255).astype(np.uint8), mode="RGB"
+        )
+        # else:
+        #     print(f"{name} - Using original diffuse")
+
+        # Save metadata
+        with open(out_path / f"{name}.json", "w") as f:
+            # Override category
+            metadata["category"] = category
+            json.dump(metadata, f, indent=4)
+
+        # Save all images
         ao_map.save(out_path / f"{name}_ao.png", format="PNG")
-        # Save also albedo for inspection
         albedo.save(out_path / f"{name}_basecolor.png", format="PNG")
+        diffuse.save(out_path / f"{name}_diffuse.png", format="PNG")
+        height.save(out_path / f"{name}_height.png", format="PNG")
+        normal.save(out_path / f"{name}_normal.png", format="PNG")
+        roughness.save(out_path / f"{name}_roughness.png", format="PNG")
+        metallic.save(out_path / f"{name}_metallic.png", format="PNG")
+        specular.save(out_path / f"{name}_specular.png", format="PNG")
 
-        if i in index_data["same_diffuse_albedo_indexes"]:
-            print(f"Generating synthetic diffuse for {name} ({i})")
-            alb_arr = np.asarray(albedo.convert("RGB"), dtype=np.float32) / 255.0
-            normal_arr = np.asarray(normal.convert("RGB"), dtype=np.float32) / 255.0
-            height_arr = np.asarray(height.convert("I;16"), dtype=np.float32) / 65535.0
-            metallic_arr = np.asarray(metallic.convert("L"), dtype=np.float32) / 255.0
-            # Specular map in MatSynth is in RGB format with PBR specularity
-            specular_arr = np.asarray(specular.convert("RGB"), dtype=np.float32) / 255.0
-
-            synth = lambert(alb_arr, normal_arr)
-            synth *= screen_ao(height_arr)
-            synth += specular_highlight(specular_arr, roughness_arr, metallic_arr)
-            synth = colour_cast(synth)
-
-            synth_img = Image.fromarray(
-                (np.clip(synth, 0, 1) * 255).astype(np.uint8), mode="RGB"
-            )
-            synth_img.save(out_path / f"{name}_diffuse.png", format="PNG")
+        # synth_img.save(out_path / f"{name}_diffuse.png", format="PNG")
 
 
 def main():
@@ -241,7 +327,9 @@ def main():
         [
             "name",
             "category",
+            "metadata",
             "basecolor",
+            # "diffuse",
             "height",
             "normal",
             "roughness",
@@ -251,7 +339,7 @@ def main():
     )
     valid_indexes = index_data["all_valid_indexes"]
 
-    workers = 12
+    workers = 14
     # Split the valid indexes into chunks for parallel processing
     chunk_size = len(valid_indexes) // workers + 1
     index_chunks = [

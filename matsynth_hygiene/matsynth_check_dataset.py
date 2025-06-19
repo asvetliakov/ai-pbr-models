@@ -129,5 +129,5 @@ results = {}
 for split in ["train", "test"]:
     results[split] = process_split(split)
 
-with open("../matsynth_sample_check.json", "w") as f:
-    json.dump(results, f, indent=4)
+# with open("../matsynth_sample_check.json", "w") as f:
+#     json.dump(results, f, indent=4)
