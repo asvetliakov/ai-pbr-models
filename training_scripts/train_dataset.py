@@ -1,7 +1,9 @@
+import seed
 import os
 from PIL import Image
 from pathlib import Path
 import torch
+import random
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from typing import Callable, Optional, Tuple
@@ -86,6 +88,11 @@ class SimpleImageDataset(Dataset):
             n = len(names)
             # 5% for validation
             n_val = max(1, int(0.05 * n))
+
+            # torch data loaders are shuffling by default but for restricted dataset size
+            # we want to also shuffle it here to avoid bias in sampling
+            if max_train_samples_per_cat is not None:
+                random.shuffle(samples)
 
             samples = list(
                 map(
