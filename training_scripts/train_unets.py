@@ -1012,6 +1012,8 @@ def do_train():
                 height = height.to(device, non_blocking=True)
                 metallic = metallic.to(device, non_blocking=True)
                 roughness = roughness.to(device, non_blocking=True)
+                original_diffuse = original_diffuse.to(device, non_blocking=True)
+                original_normal = original_normal.to(device, non_blocking=True)
                 ao = ao.to(device, non_blocking=True)
 
                 with autocast(device_type=device.type):
