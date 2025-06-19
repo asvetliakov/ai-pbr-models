@@ -13,7 +13,12 @@ from torchmetrics import functional as FM
 from transformers import (
     SegformerForSemanticSegmentation,
 )
-from transformers.utils.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from transformers.utils.constants import (
+    IMAGENET_DEFAULT_MEAN,
+    IMAGENET_DEFAULT_STD,
+    IMAGENET_STANDARD_MEAN,
+    IMAGENET_STANDARD_STD,
+)
 from train_dataset import SimpleImageDataset, normalize_normal_map
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -47,7 +52,7 @@ validation_dataset = SimpleImageDataset(
     split="validation",
 )
 
-loss_weights, sample_weights = train_dataset.get_weights()
+# loss_weights, sample_weights = train_dataset.get_weights()
 
 # seg_loss_fn = torch.nn.CrossEntropyLoss(weight=loss_weights, ignore_index=255)
 seg_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=255)
@@ -114,6 +119,16 @@ transform_train = T.Compose(
     ]
 )
 
+transform_train_normal = T.Compose(
+    [
+        T.ToTensor(),
+        T.Normalize(
+            mean=IMAGENET_STANDARD_MEAN,
+            std=IMAGENET_STANDARD_STD,
+        ),
+    ]
+)
+
 
 def center_crop(
     image: Image.Image,
@@ -132,6 +147,16 @@ transform_val = T.Compose(
         T.Normalize(
             mean=IMAGENET_DEFAULT_MEAN,
             std=IMAGENET_DEFAULT_STD,
+        ),
+    ]
+)
+
+transform_val_normal = T.Compose(
+    [
+        T.ToTensor(),
+        T.Normalize(
+            mean=IMAGENET_STANDARD_MEAN,
+            std=IMAGENET_STANDARD_STD,
         ),
     ]
 )
@@ -183,14 +208,12 @@ def transform_train_fn(example):
         albedo, normal, size=(256, 256), resize_to=[1024, 1024]
     )
     albedo = transform_train(albedo)
-    normal = transform_train(normal)
+    normal = transform_train_normal(normal)
 
     # Concatenate albedo and normal along the channel dimension
     final = torch.cat((albedo, normal), dim=0)  # type: ignore
 
-    mask = make_full_image_mask(
-        category_id=example["category"], img_size=(1024, 1024)
-    )  # (H, W)
+    mask = make_full_image_mask(category_id=category, img_size=(1024, 1024))  # (H, W)
 
     return {
         "pixel_values": final,
@@ -208,7 +231,7 @@ def transform_val_fn(example):
         center_crop(albedo, (256, 256), [1024, 1024], T.InterpolationMode.LANCZOS)
     )
 
-    normal = transform_val(
+    normal = transform_val_normal(
         normalize_normal_map(
             center_crop(normal, (256, 256), [1024, 1024], T.InterpolationMode.BILINEAR)
         )
@@ -253,7 +276,7 @@ def do_train():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WD)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_MAX)
-    scaler = GradScaler(device.type)  # AMP scaler for mixed precision
+    # scaler = GradScaler(device.type)  # AMP scaler for mixed precision
 
     best_val_loss = float("inf")
     patience = 3
@@ -289,8 +312,8 @@ def do_train():
             input = input.to(device, non_blocking=True)
             labels_gt = labels_gt.to(device, non_blocking=True)
 
-            with autocast(device_type=device.type):
-                logits = model(input).logits
+            # with autocast(device_type=device.type):
+            logits = model(input).logits
 
             # upsample logits to match the input size
             logits_up = torch.nn.functional.interpolate(
@@ -300,17 +323,18 @@ def do_train():
                 align_corners=False,
             )
             loss = seg_loss_fn(logits_up, labels_gt)
+
             train_loss_sum += loss.item()
             train_batch_count += 1
 
             optimizer.zero_grad()
 
-            # loss.backward()
-            # optimizer.step()
+            loss.backward()
+            optimizer.step()
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            # scaler.scale(loss).backward()
+            # scaler.step(optimizer)
+            # scaler.update()
 
         train_loss_avg = train_loss_sum / train_batch_count
         epoch_data["train_loss"] = train_loss_avg
@@ -336,7 +360,9 @@ def do_train():
                 input = input.to(device, non_blocking=True)
                 labels_gt = labels_gt.to(device, non_blocking=True)
 
+                # with autocast(device_type=device.type):
                 logits = model(input).logits
+
                 # upsample logits to match the input size
                 logits_up = torch.nn.functional.interpolate(
                     logits,
