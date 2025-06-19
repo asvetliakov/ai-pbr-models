@@ -226,7 +226,6 @@ def transform_train_fn(example):
 
     mask = make_full_image_mask(category, img_size=(1024, 1024))
     # Store normal for later visualization
-    normal_orig = normal
 
     diffuse = transform_train_input(diffuse)
     normal = transform_train_input(normal)
@@ -249,7 +248,7 @@ def transform_train_fn(example):
         "diffuse_and_normal": diffuse_and_normal,
         "height": height,
         "albedo": albedo,
-        "normal": normal_orig,
+        "normal": normal,
         "metallic": metallic,
         "roughness": roughness,
         "ao": ao,
@@ -319,8 +318,8 @@ def transform_val_fn(example):
         interpolation=T.InterpolationMode.BILINEAR,
     )
 
-    original_normal = normal
-    original_diffuse = diffuse
+    original_normal = transform_validation_gt(normal)
+    original_diffuse = transform_validation_gt(diffuse)
 
     diffuse = transform_validation_input(diffuse)
     normal = transform_validation_input(normal)
@@ -666,28 +665,28 @@ def do_train():
             # Get albedo input for UNet-maps
             if epoch < teacher_epochs:
                 # predirected albedo is not good enough in earlier phases on early epochs so use GT albedo
-                maps_input_albedo = albedo_gt
+                unet_maps_input_albedo = albedo_gt
             else:
                 # Joint finetuning only in some phases
-                maps_input_albedo = (
+                unet_maps_input_albedo = (
                     albedo_pred if joint_finetune else albedo_pred.detach()
                 )
 
             # Normalize albedo_pred
-            maps_input_albedo = TF.normalize(
-                maps_input_albedo,
+            unet_maps_input_albedo = TF.normalize(
+                unet_maps_input_albedo,
                 mean=IMAGENET_STANDARD_MEAN,
                 std=IMAGENET_STANDARD_STD,
             )
 
-            maps_input = torch.cat(
-                [maps_input_albedo, normal],
+            unet_maps_input = torch.cat(
+                [unet_maps_input_albedo, normal],
                 dim=1,  # Concatenate albedo and normal along the channel dimension (B, 6, H, W)
             )
 
             with autocast(device_type=device.type):
                 # Get UNet-Maps prediction
-                maps_pred = unet_maps(maps_input, None)
+                maps_pred = unet_maps(unet_maps_input, None)
 
             roughness_pred = maps_pred["rough"]
             metallic_pred = maps_pred["metal"]
@@ -767,31 +766,21 @@ def do_train():
                     #     .hidden_states[-1].detach()      # (B,256,H/16,W/16)
                     albedo_pred = unet_alb(diffuse_and_normal, None)
 
-                # Get albedo input for UNet-maps
-                if epoch < teacher_epochs:
-                    # predirected albedo is not good enough in earlier phases on early epochs so use GT albedo
-                    maps_input_albedo = albedo_gt
-                else:
-                    # Joint finetuning only in some phases
-                    maps_input_albedo = (
-                        albedo_pred if joint_finetune else albedo_pred.detach()
-                    )
-
                 # Normalize albedo_pred
-                maps_input_albedo = TF.normalize(
-                    maps_input_albedo,
+                unet_maps_input_albedo = TF.normalize(
+                    albedo_pred,
                     mean=IMAGENET_STANDARD_MEAN,
                     std=IMAGENET_STANDARD_STD,
                 )
 
-                maps_input = torch.cat(
-                    [maps_input_albedo, normal],
+                unet_maps_input = torch.cat(
+                    [unet_maps_input_albedo, normal],
                     dim=1,  # Concatenate albedo and normal along the channel dimension (B, 6, H, W)
                 )
 
                 with autocast(device_type=device.type):
                     # Get UNet-Maps prediction
-                    maps_pred = unet_maps(maps_input, None)
+                    maps_pred = unet_maps(unet_maps_input, None)
 
                 roughness_pred = maps_pred["rough"]
                 metallic_pred = maps_pred["metal"]
