@@ -293,20 +293,23 @@ def load_diffuse_and_ao(examples: dict) -> tuple[list[Image.Image], list[Image.I
         )
         input_ao.append(ao_img)
 
-        # ! Enable for Phase A+
         # Load generated diffuse if exist (many examples have same diffuse and albedo so we generated synthetic for them)
-        # diffuse_path = Path(
-        #     f"./matsynth_processed/{category}/{example['name']}_diffuse.png"
-        # )
-        # if diffuse_path.exists():
-        #     # If synthetic diffuse map exists, load it
-        #     diffuse_image = Image.open(diffuse_path).convert("RGB")
-        #     transformed_diffuse.append(diffuse_image)
-        # else:
-        diffuse = ensure_input_size(
-            diffuse.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.LANCZOS
-        )
-        input_diffuse.append(diffuse)
+        diffuse_path = Path(f"./matsynth_processed/{category}/{name}_diffuse.png")
+        if diffuse_path.exists():
+            # If synthetic diffuse map exists, load it
+            diffuse_image = ensure_input_size(
+                Image.open(diffuse_path).convert("RGB"),
+                INPUT_IMAGE_SIZE,
+                resample=Image.Resampling.LANCZOS,
+            )
+            input_diffuse.append(diffuse_image)
+        else:
+            diffuse = ensure_input_size(
+                diffuse.convert("RGB"),
+                INPUT_IMAGE_SIZE,
+                resample=Image.Resampling.LANCZOS,
+            )
+            input_diffuse.append(diffuse)
 
     return input_diffuse, input_ao
 
@@ -1060,7 +1063,7 @@ def do_train():
                     # Accumulate per-class loss
                     cat_name = CLASS_LIST[category[k].item()]  # Get the category name
 
-                    if samples_saved_per_class[cat_name] < 2:
+                    if samples_saved_per_class[cat_name] < 4:
                         # Save 2 samples per class for inspection
                         output_path = output_dir / f"val_samples_{epoch + 1}/{cat_name}"
                         output_path.mkdir(parents=True, exist_ok=True)
