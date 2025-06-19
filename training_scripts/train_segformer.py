@@ -2,12 +2,10 @@
 import seed
 import json, torch
 import numpy as np
-import random
 import multiprocessing
 from pathlib import Path
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from PIL import Image
-from datasets import load_dataset, Dataset, ClassLabel
 from tqdm import tqdm
 from torchvision import transforms as T
 from torchvision.transforms import functional as TF
@@ -16,9 +14,12 @@ from transformers import (
     SegformerForSemanticSegmentation,
 )
 from transformers.utils.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from train_dataset import SimpleImageDataset, normalize_normal_map
 
-# from torch.amp.grad_scaler import GradScaler
-# from torch.amp.autocast_mode import autocast
+BASE_DIR = Path(__file__).resolve().parent
+
+from torch.amp.grad_scaler import GradScaler
+from torch.amp.autocast_mode import autocast
 
 # HYPER_PARAMETERS
 BATCH_SIZE = 4  # Batch size for training
@@ -33,68 +34,29 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True  # Enable for faster training on fixed input sizes
 
-with open("./matsynth_final_indexes.json", "r") as f:
-    dataset_index_data = json.load(f)
+matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
 
-with open("./matsynth_stratified_splits.json", "r") as f:
-    stratified_splits = json.load(f)
+train_dataset = SimpleImageDataset(
+    matsynth_dir=str(matsynth_dir),
+    split="train",
+    max_train_samples_per_cat=144,  # For Phase A0
+)
 
-# Sort train names by categories, need later for weighted sampler
-CLASS_LIST = [
-    "ceramic",
-    "fabric",
-    "ground",
-    "leather",
-    "metal",
-    "stone",
-    "wood",
-]
-NONE_IDX = len(CLASS_LIST)  # Index for "none" category, used for safety
-CLASS_LIST_IDX_MAPPING = {name: idx for idx, name in enumerate(CLASS_LIST)}
+validation_dataset = SimpleImageDataset(
+    matsynth_dir=str(matsynth_dir),
+    split="validation",
+)
 
-INPUT_IMAGE_SIZE = (2048, 2048)  # Input image size for training, used for resizing
+loss_weights, sample_weights = train_dataset.get_weights()
 
-all_labels = []
-subset_names = stratified_splits["train_a_0"]["names"]
-#  We need 1:1 label mapping in the same order as it appears in the dataset
-for name in stratified_splits["train_a_0"]["names"]:
-    # Get the category from the mapping
-    category = dataset_index_data["new_category_mapping"].get(name, None)
-    if category is not None:
-        # Get the index of the category in CLASS_LIST
-        label_idx = CLASS_LIST_IDX_MAPPING.get(category, None)
-        if label_idx is not None:
-            all_labels.append(label_idx)
-        else:
-            print(f"Warning: Category '{category}' not found in CLASS_LIST.")
-
-# Calcualte weights
-num_classes = len(CLASS_LIST)
-cls_counts = torch.bincount(torch.tensor(all_labels), minlength=num_classes)
-freq = cls_counts / cls_counts.sum()
-
-print("Class counts:", cls_counts)
-print("Class frequencies:", freq)
-
-# Loss weights are inversely proportional to the square root of the frequency of each class
-loss_weights = 1.0 / torch.sqrt(freq + 1e-6)  # avoid ÷0
-loss_weights *= num_classes / loss_weights.sum()
 # seg_loss_fn = torch.nn.CrossEntropyLoss(weight=loss_weights, ignore_index=255)
 seg_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=255)
 # seq_per_class_fn = torch.nn.CrossEntropyLoss(
 #     weight=loss_weights, ignore_index=255, reduction="none"
 # )
 seq_per_class_fn = torch.nn.CrossEntropyLoss(ignore_index=255, reduction="none")
-print("Loss weights:", loss_weights)
 
 # ! DISABLED FOR PHASE A0, REENABLE FOR PHASE A+
-# Sample weights for each class
-# sample_weighs_per_class = 1.0 / (cls_counts + 1e-6)
-# sample_weights = sample_weighs_per_class[all_labels]
-
-# print("Sample weights per class:", sample_weighs_per_class)
-# print("Sample weights:", sample_weights)
-
 # # Will pull random samples according to the sample weights
 # train_sampler = WeightedRandomSampler(
 #     weights=sample_weights.tolist(),
@@ -107,7 +69,7 @@ device = torch.device("cuda")
 
 model = SegformerForSemanticSegmentation.from_pretrained(
     "nvidia/segformer-b2-finetuned-ade-512-512",
-    num_labels=len(CLASS_LIST),  # Number of classes for segmentation
+    num_labels=len(train_dataset.CLASS_LIST),  # Number of classes for segmentation
     ignore_mismatched_sizes=True,  # Ignore size mismatch for classification head
 ).to(
     device  # type: ignore
@@ -144,9 +106,6 @@ model.config.num_channels = 6
 
 transform_train = T.Compose(
     [
-        # Take random crop (consult augment table in plan)
-        # T.RandomCrop(size=(256, 256)),
-        # T.Resize((1024, 1024), interpolation=T.InterpolationMode.BILINEAR),
         T.ToTensor(),
         T.Normalize(
             mean=IMAGENET_DEFAULT_MEAN,
@@ -156,22 +115,26 @@ transform_train = T.Compose(
 )
 
 
-def transform_val(
-    image: Image.Image, interpolation: T.InterpolationMode
-) -> torch.Tensor:
-    composed = T.Compose(
-        [
-            # Need to use same crop size for validation
-            T.CenterCrop(size=(256, 256)),
-            T.Resize((1024, 1024), interpolation=interpolation),
-            T.ToTensor(),
-            T.Normalize(
-                mean=IMAGENET_DEFAULT_MEAN,
-                std=IMAGENET_DEFAULT_STD,
-            ),
-        ]
-    )
-    return composed(image)  # type: ignore
+def center_crop(
+    image: Image.Image,
+    size: tuple[int, int],
+    resize_to: list[int],
+    interpolation: T.InterpolationMode,
+) -> Image.Image:
+    crop = TF.center_crop(image, size)  # type: ignore
+    resized = TF.resize(crop, resize_to, interpolation=interpolation)  # type: ignore
+    return resized  # type: ignore
+
+
+transform_val = T.Compose(
+    [
+        T.ToTensor(),
+        T.Normalize(
+            mean=IMAGENET_DEFAULT_MEAN,
+            std=IMAGENET_DEFAULT_STD,
+        ),
+    ]
+)
 
 
 def synced_crop_and_resize(
@@ -194,26 +157,10 @@ def synced_crop_and_resize(
     normal_resize = TF.resize(
         normal_crop, resize_to, interpolation=T.InterpolationMode.BILINEAR
     )
+    normal_resize = normalize_normal_map(normal_resize)  # type: ignore
 
     # image not tensors
     return albedo_resize, normal_resize  # type: ignore
-
-
-def convert_normal_to_directx_type(normal: Image.Image) -> Image.Image:
-    """
-    Convert normal map from OpenGL format  to DirectX format.
-    OpenGL normal maps have the green channel inverted compared to DirectX.
-    """
-    np_img = np.array(normal, dtype=np.float32) / 255.0
-
-    R = np_img[..., 0]  # Red channel
-    G = np_img[..., 1]  # Green channel
-    B = np_img[..., 2]  # Blue channel
-
-    G = 1.0 - G  # Invert green channel for DirectX format
-
-    converted = np.stack((R, G, B), axis=-1)  # Stack channels back together
-    return Image.fromarray((converted * 255).astype(np.uint8))
 
 
 def make_full_image_mask(category_id: int, img_size: tuple[int, int]) -> torch.Tensor:
@@ -227,171 +174,70 @@ def make_full_image_mask(category_id: int, img_size: tuple[int, int]) -> torch.T
     return torch.from_numpy(mask_np)
 
 
-def ensure_input_size(
-    im: Image.Image, size: tuple[int, int], resample: Image.Resampling
-):
-    if im.size == size:
-        return im
-    return im.resize(size, resample)
+def transform_train_fn(example):
+    albedo = example["basecolor"]
+    normal = example["normal"]
+    category = example["category"]
 
+    albedo, normal = synced_crop_and_resize(
+        albedo, normal, size=(256, 256), resize_to=[1024, 1024]
+    )
+    albedo = transform_train(albedo)
+    normal = transform_train(normal)
 
-def transform_train_fn(examples):
-    # Transform
-    transformed_albedo = [
-        ensure_input_size(
-            image.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.LANCZOS
-        )
-        for image in examples["basecolor"]
-    ]
-    transformed_normal = [
-        ensure_input_size(
-            image.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
-        )
-        for image in examples["normal"]
-    ]
+    # Concatenate albedo and normal along the channel dimension
+    final = torch.cat((albedo, normal), dim=0)  # type: ignore
 
-    # Check if there any examples with "none" category and warn if so
-    if NONE_IDX in examples["category"]:
-        print(
-            "Warning: There are examples with 'none' category in the training set. "
-            "This may lead to incorrect training results."
-        )
-        # Print affected names
-        none_names = [
-            name
-            for name, category in zip(examples["name"], examples["category"])
-            if category == NONE_IDX
-        ]
-        print(f"Affected names: {none_names}")
-
-    final = []
-    for albedo, normal in zip(transformed_albedo, transformed_normal):
-        albedo, normal = synced_crop_and_resize(
-            albedo, normal, size=(256, 256), resize_to=[1024, 1024]
-        )
-        albedo = transform_train(albedo)
-        # MatSynth dataset uses OpenGL normal maps, we need to convert them to DirectX format
-        # Using it here to avoid converting 4k images
-        normal = transform_train(convert_normal_to_directx_type(normal))
-
-        # Concatenate albedo and normal along the channel dimension
-        final.append(torch.cat((albedo, normal), dim=0))  # type: ignore
-
-    masks = [
-        make_full_image_mask(category_id=category, img_size=(1024, 1024))
-        for category in examples["category"]
-    ]
+    mask = make_full_image_mask(
+        category_id=example["category"], img_size=(1024, 1024)
+    )  # (H, W)
 
     return {
         "pixel_values": final,
-        "labels": torch.stack(masks, dim=0),  # (B, H, W)
-        "category": examples["category"],  # keep for reference
+        "labels": mask,
+        "category": category,  # keep for reference
     }
 
 
-def transform_val_fn(examples):
-    # Transform
-    transformed = [
-        transform_val(
-            ensure_input_size(
-                image.convert("RGB"),
-                INPUT_IMAGE_SIZE,
-                resample=Image.Resampling.LANCZOS,
-            ),
-            T.InterpolationMode.LANCZOS,
+def transform_val_fn(example):
+    albedo = example["basecolor"]
+    normal = example["normal"]
+    category = example["category"]
+
+    albedo = transform_val(
+        center_crop(albedo, (256, 256), [1024, 1024], T.InterpolationMode.LANCZOS)
+    )
+
+    normal = transform_val(
+        normalize_normal_map(
+            center_crop(normal, (256, 256), [1024, 1024], T.InterpolationMode.BILINEAR)
         )
-        for image in examples["basecolor"]
-    ]
+    )
 
-    transformed_normal = [
-        # MatSynth dataset uses OpenGL normal maps, we need to convert them to DirectX format
-        transform_val(
-            convert_normal_to_directx_type(
-                ensure_input_size(
-                    image.convert("RGB"),
-                    INPUT_IMAGE_SIZE,
-                    resample=Image.Resampling.BILINEAR,
-                )
-            ),
-            T.InterpolationMode.BILINEAR,
-        )
-        for image in examples["normal"]
-    ]
+    # Concatenate albedo and normal along the channel dimension
+    final = torch.cat((albedo, normal), dim=0)  # type: ignore
 
-    final = []
-    for albedo, normal in zip(transformed, transformed_normal):
-        # Concatenate albedo and normal along the channel dimension
-        final.append(torch.cat((albedo, normal), dim=0))  # type: ignore
-
-    masks = [
-        # MatSynth dataset uses OpenGL normal maps, we need to convert them to DirectX format
-        make_full_image_mask(category_id=category, img_size=(1024, 1024))
-        for category in examples["category"]
-    ]
+    mask = make_full_image_mask(category_id=category, img_size=(1024, 1024))
 
     return {
         "pixel_values": final,
-        "labels": torch.stack(masks, dim=0),  # (B, H, W)
-        "category": examples["category"],  # keep for reference
+        "labels": mask,
+        "category": category,  # keep for reference
     }
 
 
-def load_my_dataset() -> tuple[Dataset, Dataset]:
-    # I have prepared specific dataset indexes so there shouldn't be actual none categories when training
-    # But putting here "none" for safety
-    CLASS_LIST_WITH_NONE = CLASS_LIST + ["none"]
-    CLASS_LIST_IDX_MAPPING["none"] = NONE_IDX
-
-    dataset: Dataset = load_dataset("gvecchio/MatSynth", split="train", streaming=False, num_proc=8)  # type: ignore
-    # Process dataset to remmap categories, use temp_ds with only name and category to avoid loading images
-    temp_ds = dataset.select_columns(["name", "category"])
-    temp_ds = temp_ds.map(
-        lambda item: {
-            "name": item["name"],
-            "category": CLASS_LIST_IDX_MAPPING.get(
-                dataset_index_data["new_category_mapping"].get(item["name"], "none"),
-                len(CLASS_LIST),
-            ),
-        },
-    )
-
-    # For SegFormer we need only the basecolor(albedo) and category
-    dataset = dataset.select_columns(["name", "basecolor", "normal"])
-
-    # Add our category mapping to the dataset
-    dataset = dataset.add_column(
-        name="category",
-        column=temp_ds["category"],
-        feature=ClassLabel(
-            names=CLASS_LIST_WITH_NONE,
-            num_classes=len(CLASS_LIST_WITH_NONE),
-        ),
-        new_fingerprint="my_category_mapping_v2",
-    )
-
-    # Select our prepared indexes for train & val datasets
-    # train_ds = dataset.select(stratified_splits["train"]["indexes"])
-    # ! Phase A0 uses only 1000 samples for training
-    random.shuffle(stratified_splits["train_a_0"]["indexes"])
-    train_ds = dataset.select(stratified_splits["train_a_0"]["indexes"])
-
-    val_ds = dataset.select(stratified_splits["validation"]["indexes"])
-
-    train_ds.set_transform(transform_train_fn)
-    val_ds.set_transform(transform_val_fn)
-
-    return train_ds, val_ds
+train_dataset.set_transform(transform_train_fn)
+validation_dataset.set_transform(transform_val_fn)
 
 
 # Training loop
 def do_train():
-    train_ds, val_ds = load_my_dataset()
     print(
-        f"Starting training for {EPOCHS} epochs, on {len(train_ds)} samples, validation on {len(val_ds)} samples."
+        f"Starting training for {EPOCHS} epochs, on {len(train_dataset)} samples, validation on {len(validation_dataset)} samples."
     )
 
     train_loader = DataLoader(
-        train_ds,  # type: ignore
+        train_dataset,  # type: ignore
         batch_size=BATCH_SIZE,
         # sampler=train_sampler,
         # num_workers=4,
@@ -399,7 +245,7 @@ def do_train():
     )
 
     validation_loader = DataLoader(
-        val_ds,  # type: ignore
+        validation_dataset,  # type: ignore
         batch_size=BATCH_SIZE,
         shuffle=False,  # No need to shuffle validation data
         # num_workers=6,
@@ -407,7 +253,7 @@ def do_train():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WD)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_MAX)
-    # scaler = GradScaler(device.type)  # AMP scaler for mixed precision
+    scaler = GradScaler(device.type)  # AMP scaler for mixed precision
 
     best_val_loss = float("inf")
     patience = 3
@@ -428,8 +274,8 @@ def do_train():
             "epoch": epoch + 1,
             "train_loss": 0.0,
             "val_loss": 0.0,
-            "per_class_loss": {name: 0.0 for name in CLASS_LIST},
-            "IoU": {name: 0.0 for name in CLASS_LIST},
+            "per_class_loss": {name: 0.0 for name in train_dataset.CLASS_LIST},
+            "IoU": {name: 0.0 for name in train_dataset.CLASS_LIST},
             "mIoU": 0.0,
         }
 
@@ -443,8 +289,9 @@ def do_train():
             input = input.to(device, non_blocking=True)
             labels_gt = labels_gt.to(device, non_blocking=True)
 
-            # with autocast(device_type=device.type):
-            logits = model(input).logits
+            with autocast(device_type=device.type):
+                logits = model(input).logits
+
             # upsample logits to match the input size
             logits_up = torch.nn.functional.interpolate(
                 logits,
@@ -458,12 +305,12 @@ def do_train():
 
             optimizer.zero_grad()
 
-            loss.backward()
-            optimizer.step()
+            # loss.backward()
+            # optimizer.step()
 
-            # scaler.scale(loss).backward()
-            # scaler.step(optimizer)
-            # scaler.update()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
         train_loss_avg = train_loss_sum / train_batch_count
         epoch_data["train_loss"] = train_loss_avg
@@ -474,10 +321,10 @@ def do_train():
 
         # Per class cross-entropy loss
         val_total_loss_per_class = torch.zeros(
-            len(CLASS_LIST), dtype=torch.float32, device="cuda"
+            len(train_dataset.CLASS_LIST), dtype=torch.float32, device="cuda"
         )
         val_total_pixels_per_class = torch.zeros(
-            len(CLASS_LIST), dtype=torch.float32, device="cuda"
+            len(train_dataset.CLASS_LIST), dtype=torch.float32, device="cuda"
         )
 
         with torch.no_grad():
@@ -505,7 +352,7 @@ def do_train():
                 flat_loss = pixel_loss.view(-1)
                 flat_labels = labels_gt.view(-1)
 
-                for c in range(len(CLASS_LIST)):
+                for c in range(len(train_dataset.CLASS_LIST)):
                     mask = flat_labels == c
                     val_total_loss_per_class[c] += flat_loss[mask].sum()
                     val_total_pixels_per_class[c] += mask.sum()
@@ -524,12 +371,12 @@ def do_train():
         jaccard_index = FM.jaccard_index(
             val_all_preds,
             val_all_labels,
-            num_classes=len(CLASS_LIST),
+            num_classes=len(train_dataset.CLASS_LIST),
             ignore_index=255,  # Ignore the background class
             task="multiclass",
             average="none",  # Calculate IoU for each class separately
         )
-        for idx, name in enumerate(CLASS_LIST):
+        for idx, name in enumerate(train_dataset.CLASS_LIST):
             epoch_data["IoU"][name] = jaccard_index[idx].item()
 
         epoch_data["mIoU"] = jaccard_index.mean().item()
@@ -537,7 +384,7 @@ def do_train():
         val_avg_loss_per_class = val_total_loss_per_class / (
             val_total_pixels_per_class + 1e-6
         )
-        for idx, name in enumerate(CLASS_LIST):
+        for idx, name in enumerate(train_dataset.CLASS_LIST):
             epoch_data["per_class_loss"][name] = val_avg_loss_per_class[idx].item()
 
         print(json.dumps(epoch_data, indent=4))
