@@ -496,6 +496,8 @@ def transform_val_fn(examples):
     final_ao = []
     final_masks = []
     final_normal = []
+    final_normal_gt = []
+    final_diffuse_gt = []
 
     for diffuse, normal, albedo_gt, height, metallic, roughness, ao, category in zip(
         input_diffuse,
@@ -508,6 +510,12 @@ def transform_val_fn(examples):
         input_category,
     ):
         final_masks.append(make_full_image_mask(category, img_size=(1024, 1024)))
+
+        # Store original non normalized diffuse and normal for visual inspection in validation loop
+        diffuse_gt = transform_validation_gt(diffuse, T.InterpolationMode.LANCZOS)
+        final_diffuse_gt.append(diffuse_gt)
+        normal_gt = transform_validation_gt(normal, T.InterpolationMode.BILINEAR)
+        final_normal_gt.append(normal_gt)
 
         diffuse = transform_validation_input(diffuse, T.InterpolationMode.LANCZOS)
         normal = transform_validation_input(
@@ -549,18 +557,9 @@ def transform_val_fn(examples):
         ),  # Concatenate masks along batch dimension
         "category": examples["category"],  # keep for reference
         "name": input_names,  # keep for reference
+        "original_diffuse": final_diffuse_gt,
+        "original_normal": final_normal_gt,
     }
-
-
-INV_MEAN = [-m / s for m, s in zip(IMAGENET_STANDARD_MEAN, IMAGENET_STANDARD_STD)]
-INV_STD = [1 / s for s in IMAGENET_STANDARD_STD]
-
-
-def denormalize(tensor):
-    # tensor: (3,H,W)
-    for c, (m, s) in enumerate(zip(INV_MEAN, INV_STD)):
-        tensor[c] = tensor[c] * s + m
-    return tensor.clamp(0, 1)
 
 
 def load_my_dataset() -> tuple[Dataset, Dataset]:
@@ -1004,6 +1003,8 @@ def do_train():
                 ao = batch["ao"]
                 masks = batch["masks"]
                 names = batch["name"]
+                original_diffuse = batch["original_diffuse"]
+                original_normal = batch["original_normal"]
 
                 diffuse_and_normal = diffuse_and_normal.to(device, non_blocking=True)
                 normal = normal.to(device, non_blocking=True)
@@ -1082,12 +1083,8 @@ def do_train():
                         # Save diffuse, normal, GT albedo and predicted albedo side by side
                         visual_sample_gt = torch.cat(
                             [
-                                denormalize(
-                                    diffuse_and_normal[k][:3, ...]
-                                ),  # Diffuse - first 3 channels
-                                denormalize(
-                                    diffuse_and_normal[k][3:, ...]
-                                ),  # Normal - next 3 channels
+                                original_diffuse[k],  # Diffuse
+                                original_normal[k],  # Normal
                                 albedo_gt[k],  # GT Albedo
                                 # height[i],  # Height
                                 to_rgb(metallic[k]),  # Metallic
@@ -1098,12 +1095,8 @@ def do_train():
                         )
                         visual_sample_predicted = torch.cat(
                             [
-                                denormalize(
-                                    diffuse_and_normal[k][:3, ...]
-                                ),  # Diffuse - first 3 channels
-                                denormalize(
-                                    diffuse_and_normal[k][3:, ...]
-                                ),  # Normal - next 3 channels
+                                original_diffuse[k],  # Diffuse
+                                original_normal[k],  # Normal
                                 albedo_pred[k],  # Predicted Albedo
                                 # height_pred[i],  # Height
                                 to_rgb(metallic_pred[k]),  # Metallic
