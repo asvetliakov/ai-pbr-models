@@ -92,7 +92,7 @@ class SimpleImageDataset(Dataset):
             # torch data loaders are shuffling by default but for restricted dataset size
             # we want to also shuffle it here to avoid bias in sampling
             if max_train_samples_per_cat is not None:
-                random.shuffle(samples)
+                random.shuffle(names)
 
             samples = list(
                 map(
