@@ -40,6 +40,12 @@ with open(BASE_DIR / "matsynth_name_index_map.json", "r") as f:
 #     cv2.imwrite(str(p_path), h8)  # PNG → convert to DDS later
 
 
+def ensure_2k_size(im: Image.Image, resample: Image.Resampling):
+    if im.size == (2048, 2048):
+        return im
+    return im.resize((2048, 2048), resample)
+
+
 def height_to_ao(
     pil_h: Image.Image,
     k: float = 4.0,
@@ -221,25 +227,25 @@ def process_batch(indexes, dataset: Dataset):
         metadata["original_matsynth_index"] = matsynth_index
 
         # Resize images to 2048x2048 (to avoid wasting time resizing them on-fly when training) and make sure they are in the correct format (they should be already but for safety)
-        albedo = albedo.convert("RGB").resize(
-            (2048, 2048), resample=Image.Resampling.LANCZOS
+        albedo = ensure_2k_size(
+            albedo.convert("RGB"), resample=Image.Resampling.LANCZOS
         )
 
-        height = height.convert("I;16").resize(
-            (2048, 2048), resample=Image.Resampling.BICUBIC
+        height = ensure_2k_size(
+            height.convert("I;16"), resample=Image.Resampling.BICUBIC
         )
 
         # ! Make sure we convert normal maps to DirectX format before using it for diffuse generation
         normal = convert_normal_to_directx_and_renorm(normal.convert("RGB"))
 
-        roughness = roughness.convert("L").resize(
-            (2048, 2048), resample=Image.Resampling.BILINEAR
+        roughness = ensure_2k_size(
+            roughness.convert("L"), resample=Image.Resampling.BILINEAR
         )
-        metallic = metallic.convert("L").resize(
-            (2048, 2048), resample=Image.Resampling.BILINEAR
+        metallic = ensure_2k_size(
+            metallic.convert("L"), resample=Image.Resampling.BILINEAR
         )
-        specular = specular.convert("RGB").resize(
-            (2048, 2048), resample=Image.Resampling.BILINEAR
+        specular = ensure_2k_size(
+            specular.convert("RGB"), resample=Image.Resampling.BILINEAR
         )
 
         category = index_data["new_category_mapping"].get(name, None)
@@ -252,7 +258,7 @@ def process_batch(indexes, dataset: Dataset):
 
         # Generate AO map based on height map data
         # print(f"{name} - Generating AO")
-        roughness_arr = np.asarray(roughness.convert("L"), dtype=np.float32) / 255.0
+        roughness_arr = np.asarray(roughness, dtype=np.float32) / 255.0
         # default, ceramic, metal
         low_sigma = 15
         hi_blend = 0.20
@@ -274,7 +280,7 @@ def process_batch(indexes, dataset: Dataset):
             hi_blend = 0.20
 
         ao_map = height_to_ao(
-            height.convert("I;16"),
+            height,
             rough_map=roughness_arr,
             low_sigma=low_sigma,
             hi_blend=hi_blend,
@@ -284,12 +290,11 @@ def process_batch(indexes, dataset: Dataset):
         # ! Generated diffuse is better for my use case. In MatSynth diffuse textures lighting is often applied only to specific parts of
         # ! the texture (like metallic parts) while the rest of the texture is unshaded
         # print(f"{name} - Generating diffuse")
-        alb_arr = np.asarray(albedo.convert("RGB"), dtype=np.float32) / 255.0
-        normal_arr = np.asarray(normal.convert("RGB"), dtype=np.float32) / 255.0
-        height_arr = np.asarray(height.convert("I;16"), dtype=np.float32) / 65535.0
-        metallic_arr = np.asarray(metallic.convert("L"), dtype=np.float32) / 255.0
-        # Specular map in MatSynth is in RGB format with PBR specularity
-        specular_arr = np.asarray(specular.convert("RGB"), dtype=np.float32) / 255.0
+        alb_arr = np.asarray(albedo, dtype=np.float32) / 255.0
+        normal_arr = np.asarray(normal, dtype=np.float32) / 255.0
+        height_arr = np.asarray(height, dtype=np.float32) / 65535.0
+        metallic_arr = np.asarray(metallic, dtype=np.float32) / 255.0
+        specular_arr = np.asarray(specular, dtype=np.float32) / 255.0
 
         synth = lambert(alb_arr, normal_arr)
         synth *= screen_ao(height_arr)
