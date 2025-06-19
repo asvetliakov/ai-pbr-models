@@ -552,6 +552,17 @@ def transform_val_fn(examples):
     }
 
 
+INV_MEAN = [-m / s for m, s in zip(IMAGENET_STANDARD_MEAN, IMAGENET_STANDARD_STD)]
+INV_STD = [1 / s for s in IMAGENET_STANDARD_STD]
+
+
+def denormalize(tensor):
+    # tensor: (3,H,W)
+    for c, (m, s) in enumerate(zip(INV_MEAN, INV_STD)):
+        tensor[c] = tensor[c] * s + m
+    return tensor.clamp(0, 1)
+
+
 def load_my_dataset() -> tuple[Dataset, Dataset]:
     # I have prepared specific dataset indexes so there shouldn't be actual none categories when training
     # But putting here "none" for safety
@@ -1071,12 +1082,12 @@ def do_train():
                         # Save diffuse, normal, GT albedo and predicted albedo side by side
                         visual_sample_gt = torch.cat(
                             [
-                                diffuse_and_normal[k][
-                                    :3, ...
-                                ],  # Diffuse - first 3 channels
-                                diffuse_and_normal[k][
-                                    3:, ...
-                                ],  # Normal - next 3 channels
+                                denormalize(
+                                    diffuse_and_normal[k][:3, ...]
+                                ),  # Diffuse - first 3 channels
+                                denormalize(
+                                    diffuse_and_normal[k][3:, ...]
+                                ),  # Normal - next 3 channels
                                 albedo_gt[k],  # GT Albedo
                                 # height[i],  # Height
                                 to_rgb(metallic[k]),  # Metallic
@@ -1087,12 +1098,12 @@ def do_train():
                         )
                         visual_sample_predicted = torch.cat(
                             [
-                                diffuse_and_normal[k][
-                                    :3, ...
-                                ],  # Diffuse - first 3 channels
-                                diffuse_and_normal[k][
-                                    3:, ...
-                                ],  # Normal - next 3 channels
+                                denormalize(
+                                    diffuse_and_normal[k][:3, ...]
+                                ),  # Diffuse - first 3 channels
+                                denormalize(
+                                    diffuse_and_normal[k][3:, ...]
+                                ),  # Normal - next 3 channels
                                 albedo_pred[k],  # Predicted Albedo
                                 # height_pred[i],  # Height
                                 to_rgb(metallic_pred[k]),  # Metallic
