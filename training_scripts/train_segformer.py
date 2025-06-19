@@ -51,6 +51,9 @@ validation_dataset = SimpleImageDataset(
     matsynth_dir=str(matsynth_dir),
     split="validation",
 )
+# Phase A0 temp since using max_train_samples_per_cat, otherwise it deterministic
+validation_dataset.all_train_samples = train_dataset.all_train_samples
+validation_dataset.all_validation_samples = train_dataset.all_validation_samples
 
 # loss_weights, sample_weights = train_dataset.get_weights()
 
