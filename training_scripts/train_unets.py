@@ -644,7 +644,6 @@ def calculate_unet_albedo_loss(
         ecpoch_data["unet_albedo"][key] = {
             "l1_loss": 0.0,
             "total_loss": 0.0,
-            "batch_count": 0,
             # "per_class_loss": {name: 0.0 for name in CLASS_LIST},
             # "per_class_sample_count": {name: 0 for name in CLASS_LIST},
         }
@@ -677,7 +676,6 @@ def calculate_unet_albedo_loss(
     total_loss = l1_loss
 
     ecpoch_data["unet_albedo"][key]["total_loss"] += total_loss.item()
-    ecpoch_data["unet_albedo"][key]["batch_count"] += 1
 
     return total_loss
 
@@ -709,7 +707,6 @@ def calculate_unet_maps_loss(
             "height_loss": 0.0,
             "height_l1_loss": 0.0,
             "height_tv": 0.0,
-            "batch_count": 0,
         }
 
     # Calculate masks
@@ -764,7 +761,6 @@ def calculate_unet_maps_loss(
 
     loss_total = (loss_rough + loss_metal + loss_ao + loss_height) / 4.0
     ecpoch_data["unet_maps"][key]["total_loss"] += loss_total.item()
-    ecpoch_data["unet_maps"][key]["batch_count"] += 1
 
     return loss_total
 
@@ -870,6 +866,12 @@ def do_train():
 
         epoch_data = {
             "epoch": epoch + 1,
+            "train": {
+                "batch_count": 0,
+            },
+            "validation": {
+                "batch_count": 0,
+            },
         }
 
         optimizer.zero_grad()
@@ -952,6 +954,8 @@ def do_train():
                 ecpoch_data=epoch_data,
                 key="train",
             )
+
+            epoch_data["train"]["batch_count"] += 1
 
             # Total loss
             total_loss = unet_albedo_loss + unet_maps_loss
@@ -1049,6 +1053,8 @@ def do_train():
                     ecpoch_data=epoch_data,
                     key="validation",
                 )
+
+                epoch_data["validation"]["batch_count"] += 1
 
                 for k in range(len(category)):
                     # Accumulate per-class loss
