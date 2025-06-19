@@ -10,16 +10,18 @@ from unet_models import UNetAlbedo, UNetMaps
 from pathlib import Path
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from PIL import Image
-from datasets import load_dataset, Dataset, ClassLabel
 from tqdm import tqdm
 from torchvision import transforms as T
 from torchvision.utils import save_image
 from torchvision.transforms import functional as TF
 from torchmetrics import functional as FM
 from transformers.utils.constants import IMAGENET_STANDARD_MEAN, IMAGENET_STANDARD_STD
+from train_dataset import SimpleImageDataset, normalize_normal_map
 
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
+
+BASE_DIR = Path(__file__).resolve().parent
 
 # HYPER_PARAMETERS
 BATCH_SIZE = 2  # Batch size for training
@@ -34,49 +36,18 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True  # Enable for faster training on fixed input sizes
 
-with open("./matsynth_final_indexes.json", "r") as f:
-    dataset_index_data = json.load(f)
+matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
 
-with open("./matsynth_stratified_splits.json", "r") as f:
-    stratified_splits = json.load(f)
+train_dataset = SimpleImageDataset(
+    matsynth_dir=str(matsynth_dir),
+    split="train",
+    max_train_samples_per_cat=144,  # For Phase A0
+)
 
-# Sort train names by categories, need later for weighted sampler
-CLASS_LIST = [
-    "ceramic",
-    "fabric",
-    "ground",
-    "leather",
-    "metal",
-    "stone",
-    "wood",
-]
-NONE_IDX = len(CLASS_LIST)  # Index for "none" category, used for safety
-CLASS_LIST_IDX_MAPPING = {name: idx for idx, name in enumerate(CLASS_LIST)}
-METAL_IDX = CLASS_LIST_IDX_MAPPING["metal"]
-
-INPUT_IMAGE_SIZE = (2048, 2048)  # Input image size for training, used for resizing
-
-all_labels = []
-subset_names = stratified_splits["train_a_0"]["names"]
-#  We need 1:1 label mapping in the same order as it appears in the dataset
-for name in stratified_splits["train_a_0"]["names"]:
-    # Get the category from the mapping
-    category = dataset_index_data["new_category_mapping"].get(name, None)
-    if category is not None:
-        # Get the index of the category in CLASS_LIST
-        label_idx = CLASS_LIST_IDX_MAPPING.get(category, None)
-        if label_idx is not None:
-            all_labels.append(label_idx)
-        else:
-            print(f"Warning: Category '{category}' not found in CLASS_LIST.")
-
-# Calcualte weights
-num_classes = len(CLASS_LIST)
-cls_counts = torch.bincount(torch.tensor(all_labels), minlength=num_classes)
-freq = cls_counts / cls_counts.sum()
-
-print("Class counts:", cls_counts)
-print("Class frequencies:", freq)
+validation_dataset = SimpleImageDataset(
+    matsynth_dir=str(matsynth_dir),
+    split="validation",
+)
 
 # ! DISABLED FOR PHASE A0, REENABLE FOR PHASE A+
 # Sample weights for each class
@@ -112,9 +83,6 @@ unet_maps = UNetMaps(
 
 transform_train_input = T.Compose(
     [
-        # Take random crop (consult augment table in plan)
-        # T.RandomCrop(size=(256, 256)),
-        # T.Resize((1024, 1024), interpolation=T.InterpolationMode.BILINEAR),
         T.ToTensor(),
         T.Normalize(
             mean=IMAGENET_STANDARD_MEAN,
@@ -129,36 +97,33 @@ transform_train_gt = T.Compose(
 )
 
 
-def transform_validation_input(
-    image: Image.Image, interpolation: T.InterpolationMode
-) -> torch.Tensor:
-    composed = T.Compose(
-        [
-            # Need to use same crop size for validation
-            T.CenterCrop(size=(256, 256)),
-            T.Resize((1024, 1024), interpolation=interpolation),
-            T.ToTensor(),
-            T.Normalize(
-                mean=IMAGENET_STANDARD_MEAN,
-                std=IMAGENET_STANDARD_STD,
-            ),
-        ]
-    )
-    return composed(image)  # type: ignore
+def center_crop(
+    image: Image.Image,
+    size: tuple[int, int],
+    resize_to: list[int],
+    interpolation: T.InterpolationMode,
+) -> Image.Image:
+    crop = TF.center_crop(image, size)  # type: ignore
+    resized = TF.resize(crop, resize_to, interpolation=interpolation)  # type: ignore
+    return resized  # type: ignore
 
 
-def transform_validation_gt(
-    image: Image.Image, interpolation: T.InterpolationMode, tensor: bool = True
-) -> torch.Tensor:
-    funcs = [
-        T.CenterCrop(size=(256, 256)),
-        T.Resize((1024, 1024), interpolation=interpolation),
+transform_validation_input = T.Compose(
+    [
+        # Need to use same crop size for validation
+        T.ToTensor(),
+        T.Normalize(
+            mean=IMAGENET_STANDARD_MEAN,
+            std=IMAGENET_STANDARD_STD,
+        ),
     ]
-    if tensor:
-        funcs.append(T.ToTensor())
+)
 
-    composed = T.Compose(funcs)
-    return composed(image)  # type: ignore
+transform_validation_gt = T.Compose(
+    [
+        T.ToTensor(),
+    ]
+)
 
 
 def synced_crop_and_resize(
@@ -199,9 +164,7 @@ def synced_crop_and_resize(
     albedo_resize = TF.resize(
         albedo_crop, resize_to, interpolation=T.InterpolationMode.LANCZOS
     )
-    normal_resize = TF.resize(
-        normal_crop, resize_to, interpolation=T.InterpolationMode.BILINEAR
-    )
+    normal_resize = normalize_normal_map(TF.resize(normal_crop, resize_to, interpolation=T.InterpolationMode.BILINEAR))  # type: ignore
     height_resize = TF.resize(
         height_crop, resize_to, interpolation=T.InterpolationMode.BICUBIC
     )
@@ -227,93 +190,6 @@ def synced_crop_and_resize(
     )  # type: ignore
 
 
-def convert_normal_to_directx_type(normal: Image.Image) -> Image.Image:
-    """
-    Convert normal map from OpenGL format  to DirectX format.
-    OpenGL normal maps have the green channel inverted compared to DirectX.
-    """
-    np_img = np.array(normal, dtype=np.float32) / 255.0
-
-    R = np_img[..., 0]  # Red channel
-    G = np_img[..., 1]  # Green channel
-    B = np_img[..., 2]  # Blue channel
-
-    G = 1.0 - G  # Invert green channel for DirectX format
-
-    converted = np.stack((R, G, B), axis=-1)  # Stack channels back together
-    return Image.fromarray((converted * 255).astype(np.uint8))
-
-
-def check_none_category(examples):
-    """
-    Check if there are any examples with "none" category and warn if so.
-    This is used to prevent training on examples with "none" category.
-    """
-    if NONE_IDX in examples["category"]:
-        print(
-            "Warning: There are examples with 'none' category in the dataset. "
-            "This may lead to incorrect training results."
-        )
-        # Print affected names
-        none_names = [
-            name
-            for name, category in zip(examples["name"], examples["category"])
-            if category == NONE_IDX
-        ]
-        print(f"Affected names: {none_names}")
-        raise ValueError(
-            f"Examples {none_names} has 'none' category, which is not allowed in training."
-        )
-
-
-def ensure_input_size(
-    im: Image.Image, size: tuple[int, int], resample: Image.Resampling
-):
-    if im.size == size:
-        return im
-    return im.resize(size, resample)
-
-
-def load_diffuse_and_ao(examples: dict) -> tuple[list[Image.Image], list[Image.Image]]:
-    # Load from disk
-    input_ao = []
-    # Either load from disk (if exist) or use existing diffuse
-    input_diffuse = []
-
-    categories = examples["category"]
-    names = examples["name"]
-    diffuse = examples["diffuse"]
-
-    for name, category_idx, diffuse in zip(names, categories, diffuse):
-        category = CLASS_LIST[category_idx]
-        ao_path = Path(f"./matsynth_processed/{category}/{name}_ao.png")
-        ao_img = Image.open(ao_path).convert("L")  # Load AO map as grayscale
-        ao_img = ensure_input_size(
-            ao_img, INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
-        )
-        input_ao.append(ao_img)
-
-        # Load generated diffuse if exist (many examples have same diffuse and albedo so we generated synthetic for them)
-        diffuse_path = Path(f"./matsynth_processed/{category}/{name}_diffuse.png")
-        if diffuse_path.exists():
-            # If synthetic diffuse map exists, load it
-            diffuse_image = ensure_input_size(
-                Image.open(diffuse_path).convert("RGB"),
-                INPUT_IMAGE_SIZE,
-                resample=Image.Resampling.LANCZOS,
-            )
-            input_diffuse.append(diffuse_image)
-        else:
-            diffuse = ensure_input_size(
-                diffuse.convert("RGB"),
-                INPUT_IMAGE_SIZE,
-                resample=Image.Resampling.LANCZOS,
-            )
-            input_diffuse.append(diffuse)
-
-    return input_diffuse, input_ao
-
-
 def make_full_image_mask(category_id: int, img_size: tuple[int, int]) -> torch.Tensor:
     """
     Build a segmentation mask of shape (H, W) where every pixel = category_id.
@@ -325,290 +201,157 @@ def make_full_image_mask(category_id: int, img_size: tuple[int, int]) -> torch.T
     return torch.from_numpy(mask_np)
 
 
-def transform_train_fn(examples):
-    # Check if there any examples with "none" category and warn if so
-    check_none_category(examples)
+def transform_train_fn(example):
+    albedo = example["basecolor"]
+    normal = example["normal"]
+    height = example["height"]
+    metallic = example["metallic"]
+    roughness = example["roughness"]
+    diffuse = example["diffuse"]
+    ao = example["ao"]
+    category = example["category"]
+    name = example["name"]
 
-    # img: Image.Image = Image.open(examples["basecolor"][0])  # Use first image to get size
-    # img.convert("RGB").resize((1024, 1024), resample=Image.Resampling.LANCZOS)  # Resize to 1024x1024 for training
+    diffuse, normal, albedo, height, metallic, roughness, ao = synced_crop_and_resize(
+        diffuse,
+        normal,
+        albedo,
+        height,
+        metallic,
+        roughness,
+        ao,
+        crop_size=(256, 256),  # Crop size for training
+        resize_to=[1024, 1024],  # Resize to 1024x1024 for training
+    )
 
-    input_albedo = [
-        ensure_input_size(
-            image.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.LANCZOS
-        )
-        for image in examples["basecolor"]
-    ]
-    input_normal = [
-        ensure_input_size(
-            image.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
-        )
-        for image in examples["normal"]
-    ]
-    input_height = [
-        ensure_input_size(
-            image.convert("I;16"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BICUBIC
-        )
-        for image in examples["height"]
-    ]
-    input_metallic = [
-        ensure_input_size(
-            image.convert("L"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
-        )
-        for image in examples["metallic"]
-    ]
-    input_roughness = [
-        ensure_input_size(
-            image.convert("L"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
-        )
-        for image in examples["roughness"]
-    ]
-    input_category = examples["category"]
-    input_names = examples["name"]
+    mask = make_full_image_mask(category, img_size=(1024, 1024))
+    # Store normal for later visualization
+    normal_orig = normal
 
-    # Load diffuse and AO maps. AO is always loaded from disk, diffuse is either loaded from disk (when sample has same albedo = diffuse) or taken from the example (when different)
-    input_diffuse, input_ao = load_diffuse_and_ao(examples)
+    diffuse = transform_train_input(diffuse)
+    normal = transform_train_input(normal)
 
-    # For UNet-Albedo
-    final_diffuse_and_normal = []
-    final_albedo = []
-    final_hieght = []
-    final_metallic = []
-    final_roughness = []
-    final_ao = []
-    final_normal = []
+    # Concatenate albedo and normal along the channel dimension
+    diffuse_and_normal = torch.cat((diffuse, normal), dim=0)  # type: ignore
 
-    final_masks = []
+    albedo = transform_train_gt(albedo)
 
-    for diffuse, normal, albedo, height, metallic, roughness, ao, category in zip(
-        input_diffuse,
-        input_normal,
-        input_albedo,
-        input_height,
-        input_metallic,
-        input_roughness,
-        input_ao,
-        input_category,
-    ):
-        diffuse, normal, albedo, height, metallic, roughness, ao = (
-            synced_crop_and_resize(
-                diffuse,
-                normal,
-                albedo,
-                height,
-                metallic,
-                roughness,
-                ao,
-                crop_size=(256, 256),  # Crop size for training
-                resize_to=[1024, 1024],  # Resize to 1024x1024 for training
-            )
-        )
+    # ToTensor() is normalizing 8 bit images ( / 255 ) so for 16bit we need to do it manually
+    height_arr = np.array(height, dtype=np.uint16)
+    height_arr = height_arr.astype(np.float32) / 65535.0  # Normalize to [0, 1]
+    height = torch.from_numpy(height_arr).unsqueeze(0)
 
-        final_masks.append(make_full_image_mask(category, img_size=(1024, 1024)))
-
-        diffuse = transform_train_input(diffuse)
-        # MatSynth dataset uses OpenGL normal maps, we need to convert them to DirectX format
-        # Using it here to avoid converting 4k images
-        normal = transform_train_input(convert_normal_to_directx_type(normal))
-        # Concatenate albedo and normal along the channel dimension
-        final_diffuse_and_normal.append(torch.cat((diffuse, normal), dim=0))  # type: ignore
-        final_normal.append(normal)
-
-        albedo = transform_train_gt(albedo)
-        final_albedo.append(albedo)
-
-        # ToTensor() is normalizing 8 bit images ( / 255 ) so for 16bit we need to do it manually
-        height_arr = np.array(height, dtype=np.uint16)
-        height_arr = height_arr.astype(np.float32) / 65535.0  # Normalize to [0, 1]
-        height_tensor = torch.from_numpy(height_arr).unsqueeze(0)
-        final_hieght.append(height_tensor)
-
-        metallic = transform_train_gt(metallic)
-        final_metallic.append(metallic)
-
-        roughness = transform_train_gt(roughness)
-        final_roughness.append(roughness)
-
-        ao = transform_train_gt(ao)
-        final_ao.append(ao)
+    metallic = transform_train_gt(metallic)
+    roughness = transform_train_gt(roughness)
+    ao = transform_train_gt(ao)
 
     return {
-        "diffuse_and_normal": final_diffuse_and_normal,
-        "height": final_hieght,
-        "albedo": final_albedo,
-        "normal": final_normal,
-        "metallic": final_metallic,
-        "roughness": final_roughness,
-        "ao": final_ao,
-        "masks": torch.stack(
-            final_masks, dim=0
-        ),  # Concatenate masks along batch dimension
-        "category": examples["category"],  # keep for reference
-        "name": input_names,  # keep for reference
+        "diffuse_and_normal": diffuse_and_normal,
+        "height": height,
+        "albedo": albedo,
+        "normal": normal_orig,
+        "metallic": metallic,
+        "roughness": roughness,
+        "ao": ao,
+        "masks": mask,
+        "category": category,
+        "name": name,
     }
 
 
-def transform_val_fn(examples):
-    # Check if there any examples with "none" category and warn if so
-    check_none_category(examples)
+def transform_val_fn(example):
+    albedo = example["basecolor"]
+    normal = example["normal"]
+    height = example["height"]
+    metallic = example["metallic"]
+    roughness = example["roughness"]
+    diffuse = example["diffuse"]
+    ao = example["ao"]
+    category = example["category"]
+    name = example["name"]
 
-    input_albedo = [
-        ensure_input_size(
-            image.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.LANCZOS
+    mask = make_full_image_mask(category, img_size=(1024, 1024))
+
+    # Store original non normalized diffuse and normal for visual inspection in validation loop
+    albedo = center_crop(
+        albedo,
+        size=(256, 256),
+        resize_to=[1024, 1024],
+        interpolation=T.InterpolationMode.LANCZOS,
+    )
+    diffuse = center_crop(
+        diffuse,
+        size=(256, 256),
+        resize_to=[1024, 1024],
+        interpolation=T.InterpolationMode.LANCZOS,
+    )
+
+    normal = normalize_normal_map(
+        center_crop(
+            normal,
+            size=(256, 256),
+            resize_to=[1024, 1024],
+            interpolation=T.InterpolationMode.BILINEAR,
         )
-        for image in examples["basecolor"]
-    ]
-    input_normal = [
-        ensure_input_size(
-            image.convert("RGB"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
-        )
-        for image in examples["normal"]
-    ]
-    input_height = [
-        ensure_input_size(
-            image.convert("I;16"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BICUBIC
-        )
-        for image in examples["height"]
-    ]
-    input_metallic = [
-        ensure_input_size(
-            image.convert("L"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
-        )
-        for image in examples["metallic"]
-    ]
-    input_roughness = [
-        ensure_input_size(
-            image.convert("L"), INPUT_IMAGE_SIZE, resample=Image.Resampling.BILINEAR
-        )
-        for image in examples["roughness"]
-    ]
-    input_category = examples["category"]
-    input_names = examples["name"]
+    )
+    height = center_crop(
+        height,
+        size=(256, 256),
+        resize_to=[1024, 1024],
+        interpolation=T.InterpolationMode.BICUBIC,
+    )
+    metallic = center_crop(
+        metallic,
+        size=(256, 256),
+        resize_to=[1024, 1024],
+        interpolation=T.InterpolationMode.BILINEAR,
+    )
+    roughness = center_crop(
+        roughness,
+        size=(256, 256),
+        resize_to=[1024, 1024],
+        interpolation=T.InterpolationMode.BILINEAR,
+    )
+    ao = center_crop(
+        ao,
+        size=(256, 256),
+        resize_to=[1024, 1024],
+        interpolation=T.InterpolationMode.BILINEAR,
+    )
 
-    # Load diffuse and AO maps. AO is always loaded from disk, diffuse is either loaded from disk (when sample has same albedo = diffuse) or taken from the example (when different)
-    input_diffuse, input_ao = load_diffuse_and_ao(examples)
+    original_normal = normal
+    original_diffuse = diffuse
 
-    # For UNet-Albedo
-    final_diffuse_and_normal = []
-    final_albedo = []
-    final_height = []
-    final_metallic = []
-    final_roughness = []
-    final_ao = []
-    final_masks = []
-    final_normal = []
-    final_normal_gt = []
-    final_diffuse_gt = []
+    diffuse = transform_validation_input(diffuse)
+    normal = transform_validation_input(normal)
+    diffuse_and_normal = torch.cat((diffuse, normal), dim=0)  # type: ignore
 
-    for diffuse, normal, albedo_gt, height, metallic, roughness, ao, category in zip(
-        input_diffuse,
-        input_normal,
-        input_albedo,
-        input_height,
-        input_metallic,
-        input_roughness,
-        input_ao,
-        input_category,
-    ):
-        final_masks.append(make_full_image_mask(category, img_size=(1024, 1024)))
+    albedo = transform_validation_gt(albedo)
 
-        # Store original non normalized diffuse and normal for visual inspection in validation loop
-        diffuse_gt = transform_validation_gt(diffuse, T.InterpolationMode.LANCZOS)
-        final_diffuse_gt.append(diffuse_gt)
-        normal_gt = transform_validation_gt(normal, T.InterpolationMode.BILINEAR)
-        final_normal_gt.append(normal_gt)
+    height_arr = np.array(height, dtype=np.uint16)
+    height_arr = height_arr.astype(np.float32) / 65535.0  # Normalize to [0, 1]
+    height = torch.from_numpy(height_arr).unsqueeze(0)
 
-        diffuse = transform_validation_input(diffuse, T.InterpolationMode.LANCZOS)
-        normal = transform_validation_input(
-            convert_normal_to_directx_type(normal), T.InterpolationMode.BILINEAR
-        )
-        final_diffuse_and_normal.append(
-            torch.cat((diffuse, normal), dim=0)  # type: ignore
-        )
-        final_normal.append(normal)
+    metallic = transform_validation_gt(metallic)
 
-        albedo = transform_validation_gt(albedo_gt, T.InterpolationMode.LANCZOS)
-        final_albedo.append(albedo)
+    roughness = transform_validation_gt(roughness)
 
-        height: Image.Image = transform_validation_gt(height, T.InterpolationMode.BICUBIC, False)  # type: ignore
-        height_arr = np.array(height, dtype=np.uint16)
-        height_arr = height_arr.astype(np.float32) / 65535.0  # Normalize to [0, 1]
-        height_tensor = torch.from_numpy(height_arr).unsqueeze(0)
-        final_height.append(height_tensor)
-
-        metallic = transform_validation_gt(metallic, T.InterpolationMode.BILINEAR)
-        final_metallic.append(metallic)
-
-        roughness = transform_validation_gt(roughness, T.InterpolationMode.BILINEAR)
-        final_roughness.append(roughness)
-
-        ao = transform_validation_gt(ao, T.InterpolationMode.BILINEAR)
-        final_ao.append(ao)
+    ao = transform_validation_gt(ao)
 
     return {
-        "diffuse_and_normal": final_diffuse_and_normal,
-        "height": final_height,
-        "albedo": final_albedo,
-        "normal": final_normal,
-        "metallic": final_metallic,
-        "roughness": final_roughness,
-        "ao": final_ao,
-        "masks": torch.stack(
-            final_masks, dim=0
-        ),  # Concatenate masks along batch dimension
-        "category": examples["category"],  # keep for reference
-        "name": input_names,  # keep for reference
-        "original_diffuse": final_diffuse_gt,
-        "original_normal": final_normal_gt,
+        "diffuse_and_normal": diffuse_and_normal,
+        "height": height,
+        "albedo": albedo,
+        "normal": normal,
+        "metallic": metallic,
+        "roughness": roughness,
+        "ao": ao,
+        "masks": mask,
+        "category": category,
+        "name": name,
+        "original_diffuse": original_diffuse,
+        "original_normal": original_normal,
     }
-
-
-def load_my_dataset() -> tuple[Dataset, Dataset]:
-    # I have prepared specific dataset indexes so there shouldn't be actual none categories when training
-    # But putting here "none" for safety
-    CLASS_LIST_WITH_NONE = CLASS_LIST + ["none"]
-    CLASS_LIST_IDX_MAPPING["none"] = NONE_IDX
-
-    dataset: Dataset = load_dataset("gvecchio/MatSynth", split="train", streaming=False, num_proc=8)  # type: ignore
-    # Process dataset to remmap categories, use temp_ds with only name and category to avoid loading images
-    temp_ds = dataset.select_columns(["name", "category"])
-    temp_ds = temp_ds.map(
-        lambda item: {
-            "name": item["name"],
-            "category": CLASS_LIST_IDX_MAPPING.get(
-                dataset_index_data["new_category_mapping"].get(item["name"], "none"),
-                NONE_IDX,
-            ),
-        },
-    )
-
-    # For SegFormer we need only the basecolor(albedo) and category
-    dataset = dataset.select_columns(
-        ["name", "basecolor", "diffuse", "normal", "height", "metallic", "roughness"]
-    )
-
-    # Add our category mapping to the dataset
-    dataset = dataset.add_column(
-        name="category",
-        column=temp_ds["category"],
-        feature=ClassLabel(
-            names=CLASS_LIST_WITH_NONE,
-            num_classes=len(CLASS_LIST_WITH_NONE),
-        ),
-        new_fingerprint="my_category_mapping_v2",
-    )
-
-    # Select our prepared indexes for train & val datasets
-    # train_ds = dataset.select(stratified_splits["train"]["indexes"])
-    # ! Phase A0 uses only 1000 samples for training
-    random.shuffle(stratified_splits["train_a_0"]["indexes"])
-    train_ds = dataset.select(stratified_splits["train_a_0"]["indexes"])
-
-    val_ds = dataset.select(stratified_splits["validation"]["indexes"])
-
-    train_ds.set_transform(transform_train_fn)
-    val_ds.set_transform(transform_val_fn)
-
-    return train_ds, val_ds
 
 
 def masked_l1(pred, target, material_mask, w_fg=3.0, w_bg=1.0):
@@ -724,7 +467,7 @@ def calculate_unet_maps_loss(
 
     # Calculate masks
     mask_all = torch.ones_like(roughness_gt, dtype=torch.bool)  # (B, 1, H, W)
-    mask_metal = (masks == METAL_IDX).unsqueeze(1)  # (B, 1, H, W)
+    mask_metal = (masks == train_dataset.METAL_IDX).unsqueeze(1)  # (B, 1, H, W)
 
     # Roughness, since every pixel is important, we use a mask of ones
     l1_rough = masked_l1(
@@ -821,15 +564,18 @@ def to_rgb(x):
     return x.repeat(3, 1, 1)
 
 
+train_dataset.set_transform(transform_train_fn)
+validation_dataset.set_transform(transform_val_fn)
+
+
 # Training loop
 def do_train():
-    train_ds, val_ds = load_my_dataset()
     print(
-        f"Starting training for {EPOCHS} epochs, on {len(train_ds)} samples, validation on {len(val_ds)} samples."
+        f"Starting training for {EPOCHS} epochs, on {len(train_dataset)} samples, validation on {len(validation_dataset)} samples."
     )
 
     train_loader = DataLoader(
-        train_ds,  # type: ignore
+        train_dataset,  # type: ignore
         batch_size=BATCH_SIZE,
         # sampler=train_sampler,
         # num_workers=4,
@@ -837,7 +583,7 @@ def do_train():
     )
 
     validation_loader = DataLoader(
-        val_ds,  # type: ignore
+        validation_dataset,  # type: ignore
         batch_size=BATCH_SIZE,
         shuffle=False,  # No need to shuffle validation data
         # num_workers=6,
@@ -987,7 +733,7 @@ def do_train():
 
         unet_alb.eval()
         unet_maps.eval()
-        samples_saved_per_class = {name: 0 for name in CLASS_LIST}
+        samples_saved_per_class = {name: 0 for name in train_dataset.CLASS_LIST}
 
         with torch.no_grad():
             for batch in tqdm(
@@ -1075,7 +821,9 @@ def do_train():
 
                 for k in range(len(category)):
                     # Accumulate per-class loss
-                    cat_name = CLASS_LIST[category[k].item()]  # Get the category name
+                    cat_name = train_dataset.CLASS_LIST[
+                        category[k].item()
+                    ]  # Get the category name
 
                     if samples_saved_per_class[cat_name] < 4:
                         # Save 2 samples per class for inspection
