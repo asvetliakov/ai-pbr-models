@@ -20,14 +20,14 @@ _(Version 4.5 · 18 Jun 2025)_
 
 ## 🪜 Phase Ladder — with goals, metrics & advice
 
-| Phase  | Goal (one‑liner)                                      | Dataset Mix    | Trainable Modules                        | Crop     | Augment (new → old)               |
-| ------ | ----------------------------------------------------- | -------------- | ---------------------------------------- | -------- | --------------------------------- |
-| **A0** | Smoke‑test pipeline; get first masks & maps.          | 100 % MatSynth | SegFormer, UNet‑Albedo, UNet‑Maps (all)  | 256 px   | none                              |
-| **A**  | Learn clean PBR priors on single‑material textures.   | 100 % MatSynth | same                                     | 256 px   | flips · rot · jitter · composites |
-| **B**  | Introduce Skyrim; adapt heads with FiLM conditioning. | 75 %/25 %      | SegFormer heads+LoRA; UNet decoder heads | 256→512  | Photometric (Skyrim) · composites |
-| **C**  | Deep adaptation; unfreeze upper encoder layers.       | 50 %/50 %      | top ½ encoders + heads                   | 512→768  | same, lower composite %           |
-| **C′** | Stabilise BN/LN stats for 2 K jump.                   | 50 %/50 %      | BN/LN only                               | 1 K      | none                              |
-| **D**  | High‑res detail for each map at 2 K.                  | 100 % Skyrim   | per‑map head job                         | full 2 K | Photometric × 0.5                 |
+| Phase  | Goal (one‑liner)                                      | Dataset Mix    | Trainable Modules                        | Crop     | Augment (new → old)                                |
+| ------ | ----------------------------------------------------- | -------------- | ---------------------------------------- | -------- | -------------------------------------------------- |
+| **A0** | Smoke‑test pipeline; get first masks & maps.          | 100 % MatSynth | SegFormer, UNet‑Albedo, UNet‑Maps (all)  | 256 px   | none                                               |
+| **A**  | Learn clean PBR priors on single‑material textures.   | 100 % MatSynth | same                                     | 256 px   | flips · rot · jitter · composites (SegFormer only) |
+| **B**  | Introduce Skyrim; adapt heads with FiLM conditioning. | 75 %/25 %      | SegFormer heads+LoRA; UNet decoder heads | 256→512  | Photometric (Skyrim) · composites (All)            |
+| **C**  | Deep adaptation; unfreeze upper encoder layers.       | 50 %/50 %      | top ½ encoders + heads                   | 512→768  | same, lower composite %                            |
+| **C′** | Stabilise BN/LN stats for 2 K jump.                   | 50 %/50 %      | BN/LN only                               | 1 K      | none                                               |
+| **D**  | High‑res detail for each map at 2 K.                  | 100 % Skyrim   | per‑map head job                         | full 2 K | Photometric × 0.5                                  |
 
 Below, each phase is _self‑contained_.
 
@@ -56,7 +56,7 @@ Below, each phase is _self‑contained_.
 | **Description**        | 35 epochs to build strong physics priors. Composites automatically create multi‑material masks for SegFormer.                      |
 | **Optimizer**          | `AdamW(lr 5e‑5→1e‑5)`                                                                                                              |
 | **Scheduler**          | `OneCycleLR(max_lr=5e‑5, pct_start=0.3)`                                                                                           |
-| **Augment**            | flips, 90° rot, colour‑jitter; **composites**<br>  • 2‑crop 30 %<br>  • 4‑crop 15 %                                                |
+| **Augment**            | flips, 90° rot, colour‑jitter; **composites (SegFormer only)**<br>  • 2‑crop 30 %<br>  • 4‑crop 15 %                               |
 | **SegFormer GT**       | composites know patch coordinates ⇒ auto mask                                                                                      |
 | **Curriculum crop**    | fixed 256 px                                                                                                                       |
 | **Losses**             | same as A0 plus, `UNet-albedo`: `masked L1 + 0.1 * SSIM + 0.05 * LPIPS` (both training & validation), `Unet-maps`: see table below |
@@ -327,15 +327,14 @@ So: crop_size = 256 px means “model sees a 1024×1024 image whose content orig
 
 ### Phase-by-Phase cheat sheet
 
-| Phase         | `crop_size`           | Composite mosaics?                       | What the network finally receives                                                                                                                       |
-| ------------- | --------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **A0**        | **256 px**            | **OFF**                                  | 1024² image made from one 256 px crop up-scaled to 1 K.                                                                                                 |
-| **A**         | 256 px                | 2-crop 30 % / 4-crop 15 %                | • Single-crop images (same as A0).<br>• **30 % of batches**: two 256 px crops side-by-side → still 1024².<br>• **15 %**: four 256 px crops in 2×2 grid. |
-| **A-Alb-Syn** | 256 px                | Off (albedo pre-train needs clean pairs) | Single up-scaled crop.                                                                                                                                  |
-| **B**         | 256 → 512 px (linear) | Same composite rates as A                | Early epochs: small crops; late epochs: larger crops. Composites constructed from whichever crop size is current.                                       |
-| **C**         | 512 → 768 px          | Composites at 20 % / 10 %                | Even bigger context + sparser mosaics.                                                                                                                  |
-| **C′**        | full 1 K              | OFF                                      | Pure resizing disabled; each texture scaled to exactly 1024² without cropping.                                                                          |
-| **D**         | full 2 K              | OFF                                      | Native 2048² textures, no cropping, no mosaics.                                                                                                         |
+| Phase  | `crop_size`           | Composite mosaics?        | What the network finally receives                                                                                                                       |
+| ------ | --------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A0** | **256 px**            | **OFF**                   | 1024² image made from one 256 px crop up-scaled to 1 K.                                                                                                 |
+| **A**  | 256 px                | 2-crop 30 % / 4-crop 15 % | • Single-crop images (same as A0).<br>• **30 % of batches**: two 256 px crops side-by-side → still 1024².<br>• **15 %**: four 256 px crops in 2×2 grid. |
+| **B**  | 256 → 512 px (linear) | Same composite rates as A | Early epochs: small crops; late epochs: larger crops. Composites constructed from whichever crop size is current.                                       |
+| **C**  | 512 → 768 px          | Composites at 20 % / 10 % | Even bigger context + sparser mosaics.                                                                                                                  |
+| **C′** | full 1 K              | OFF                       | Pure resizing disabled; each texture scaled to exactly 1024² without cropping.                                                                          |
+| **D**  | full 2 K              | OFF                       | Native 2048² textures, no cropping, no mosaics.                                                                                                         |
 
 ## Texture augmentation table
 
