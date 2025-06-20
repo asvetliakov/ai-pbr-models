@@ -9,8 +9,8 @@ from pathlib import Path
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from PIL import Image
 from tqdm import tqdm
-from torchvision import transforms as T
-from torchvision.utils import save_image
+
+# from torchvision.utils import save_image
 from torchvision.transforms import functional as TF
 from torchmetrics import functional as FM
 from transformers import (
@@ -126,57 +126,16 @@ model.load_state_dict(
 )
 
 
-transform_train = T.Compose(
-    [
-        T.ToTensor(),
-        T.Normalize(
-            mean=IMAGENET_DEFAULT_MEAN,
-            std=IMAGENET_DEFAULT_STD,
-        ),
-    ]
-)
-
-transform_train_normal = T.Compose(
-    [
-        T.ToTensor(),
-        T.Normalize(
-            mean=IMAGENET_STANDARD_MEAN,
-            std=IMAGENET_STANDARD_STD,
-        ),
-    ]
-)
-
-
 def center_crop(
     image: Image.Image,
     size: tuple[int, int],
     resize_to: list[int],
-    interpolation: T.InterpolationMode,
+    interpolation: TF.InterpolationMode,
 ) -> Image.Image:
     crop = TF.center_crop(image, size)  # type: ignore
     resized = TF.resize(crop, resize_to, interpolation=interpolation)  # type: ignore
     return resized  # type: ignore
 
-
-transform_val = T.Compose(
-    [
-        T.ToTensor(),
-        T.Normalize(
-            mean=IMAGENET_DEFAULT_MEAN,
-            std=IMAGENET_DEFAULT_STD,
-        ),
-    ]
-)
-
-transform_val_normal = T.Compose(
-    [
-        T.ToTensor(),
-        T.Normalize(
-            mean=IMAGENET_STANDARD_MEAN,
-            std=IMAGENET_STANDARD_STD,
-        ),
-    ]
-)
 
 saved_images = 0
 img_test_dir = Path("./test_images")
@@ -195,7 +154,7 @@ img_test_dir = Path("./test_images")
 
 def get_transform_train(current_epoch: int, augmentations=True) -> Callable:
     def transform_train_fn(example):
-        name = example["name"]
+        # name = example["name"]
 
         # Upper left corner tuple for each cro
         positions = [(0, 0)]
@@ -230,7 +189,7 @@ def get_transform_train(current_epoch: int, augmentations=True) -> Callable:
         final_albedo = Image.new("RGB", (1024, 1024))
         final_normal = Image.new("RGB", (1024, 1024))
         final_mask = torch.zeros((1024, 1024), dtype=torch.int64)
-        final_color_mask = Image.new("RGB", (1024, 1024))
+        # final_color_mask = Image.new("RGB", (1024, 1024))
 
         for sample, pos in zip(samples, positions):
             albedo = sample["basecolor"]
@@ -290,8 +249,16 @@ def get_transform_train(current_epoch: int, augmentations=True) -> Callable:
         #     img_test_dir / f"{name}.png",
         # )
 
-        final_albedo = transform_train(final_albedo)
-        final_normal = transform_train_normal(final_normal)
+        final_albedo = TF.to_tensor(final_albedo)
+        # Segformer has been trained with ImageNet default normalization
+        final_albedo = TF.normalize(
+            final_albedo, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
+        )
+
+        final_normal = TF.to_tensor(final_normal)
+        final_normal = TF.normalize(
+            final_normal, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
+        )
 
         # Concatenate albedo and normal along the channel dimension
         final_sample = torch.cat((final_albedo, final_normal), dim=0)  # type: ignore
@@ -310,14 +277,16 @@ def transform_val_fn(example):
     normal = example["normal"]
     category = example["category"]
 
-    albedo = transform_val(
-        center_crop(albedo, (256, 256), [1024, 1024], T.InterpolationMode.LANCZOS)
-    )
+    albedo = center_crop(albedo, (256, 256), [1024, 1024], TF.InterpolationMode.LANCZOS)
+    albedo = TF.to_tensor(albedo)
+    albedo = TF.normalize(albedo, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
 
-    normal = transform_val_normal(
-        normalize_normal_map(
-            center_crop(normal, (256, 256), [1024, 1024], T.InterpolationMode.BILINEAR)
-        )
+    normal = normalize_normal_map(
+        center_crop(normal, (256, 256), [1024, 1024], TF.InterpolationMode.BILINEAR)
+    )
+    normal = TF.to_tensor(normal)
+    normal = TF.normalize(
+        normal, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
     )
 
     # Concatenate albedo and normal along the channel dimension
