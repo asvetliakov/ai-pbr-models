@@ -454,7 +454,9 @@ def do_train():
                 val_loss_sum += loss.item()
                 val_batch_count += 1
 
-                pixel_loss = seq_per_class_fn(logits_up, labels_gt)
+                with autocast(device_type=device.type):
+                    pixel_loss = seq_per_class_fn(logits_up, labels_gt)
+
                 flat_loss = pixel_loss.view(-1)
                 flat_labels = labels_gt.view(-1)
 
