@@ -28,11 +28,11 @@ from torch.amp.autocast_mode import autocast
 
 # HYPER_PARAMETERS
 BATCH_SIZE = 4  # Batch size for training
-EPOCHS = 10  # Number of epochs to train
-LR = 1e-4  # Learning rate for the optimizer
+EPOCHS = 35  # Number of epochs to train
+LR = 5e-5  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
-T_MAX = 10  # Max number of epochs for the learning rate scheduler
-PHASE = "a0"  # Phase of the training per plan, used for logging and saving
+# T_MAX = 10  # Max number of epochs for the learning rate scheduler
+PHASE = "a"  # Phase of the training per plan, used for logging and saving
 
 # Enable TF32 for faster training on Ampere GPUs
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -41,10 +41,11 @@ torch.backends.cudnn.benchmark = True  # Enable for faster training on fixed inp
 
 matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
 
+device = torch.device("cuda")
+
 train_dataset = SimpleImageDataset(
     matsynth_dir=str(matsynth_dir),
     split="train",
-    max_train_samples_per_cat=144,  # For Phase A0
 )
 
 validation_dataset = SimpleImageDataset(
@@ -52,28 +53,31 @@ validation_dataset = SimpleImageDataset(
     split="validation",
 )
 # Phase A0 temp since using max_train_samples_per_cat, otherwise it deterministic
-validation_dataset.all_train_samples = train_dataset.all_train_samples
-validation_dataset.all_validation_samples = train_dataset.all_validation_samples
+# validation_dataset.all_train_samples = train_dataset.all_train_samples
+# validation_dataset.all_validation_samples = train_dataset.all_validation_samples
 
-# loss_weights, sample_weights = train_dataset.get_weights()
+loss_weights, sample_weights = train_dataset.get_weights()
 
-# seg_loss_fn = torch.nn.CrossEntropyLoss(weight=loss_weights, ignore_index=255)
-seg_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=255)
-# seq_per_class_fn = torch.nn.CrossEntropyLoss(
-#     weight=loss_weights, ignore_index=255, reduction="none"
-# )
-seq_per_class_fn = torch.nn.CrossEntropyLoss(ignore_index=255, reduction="none")
+loss_weights = loss_weights.to(device)  # type: ignore
 
-# ! DISABLED FOR PHASE A0, REENABLE FOR PHASE A+
+seg_loss_fn = torch.nn.CrossEntropyLoss(weight=loss_weights, ignore_index=255)
+seq_per_class_fn = torch.nn.CrossEntropyLoss(
+    weight=loss_weights, ignore_index=255, reduction="none"
+)
+
 # # Will pull random samples according to the sample weights
-# train_sampler = WeightedRandomSampler(
-#     weights=sample_weights.tolist(),
-#     num_samples=len(sample_weights),
-#     replacement=True,
-# )
+train_sampler = WeightedRandomSampler(
+    weights=sample_weights.tolist(),
+    num_samples=len(sample_weights),
+    replacement=True,
+)
 
 
-device = torch.device("cuda")
+# Load checkpoint from phase a0
+best_model_checkpoint_path = (
+    BASE_DIR / f"../weights/a0/segformer/best_model.pt"
+).resolve()
+best_model_checkpoint = torch.load(best_model_checkpoint_path, map_location=device)
 
 model = SegformerForSemanticSegmentation.from_pretrained(
     "nvidia/segformer-b2-finetuned-ade-512-512",
@@ -82,6 +86,7 @@ model = SegformerForSemanticSegmentation.from_pretrained(
 ).to(
     device  # type: ignore
 )
+
 # Patch segformer for 6channel input
 old_embed = model.segformer.encoder.patch_embeddings[0]
 old_conv = old_embed.proj  # Conv2d(3,64,kernel=7,stride=4,pad=3)
@@ -111,6 +116,11 @@ model.segformer.encoder.patch_embeddings[0].proj = new_conv
 
 # 6) Update config so future code knows to expect 6 channels
 model.config.num_channels = 6
+
+model.load_state_dict(
+    best_model_checkpoint["model_state_dict"],
+)
+
 
 transform_train = T.Compose(
     [
@@ -265,9 +275,9 @@ def do_train():
     train_loader = DataLoader(
         train_dataset,  # type: ignore
         batch_size=BATCH_SIZE,
-        # sampler=train_sampler,
+        sampler=train_sampler,
         # num_workers=4,
-        shuffle=True,  # ! DISABLE FOR PHASE A+
+        shuffle=False,
     )
 
     validation_loader = DataLoader(
@@ -278,8 +288,17 @@ def do_train():
     )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WD)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_MAX)
-    # scaler = GradScaler(device.type)  # AMP scaler for mixed precision
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_MAX)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=LR,
+        total_steps=EPOCHS * len(train_loader),
+        # 15% warm-up 85% cooldown
+        pct_start=0.15,
+        div_factor=5.0,  # start LR = 1e-5
+        final_div_factor=5.0,  # End LR = 1e-5
+    )
+    scaler = GradScaler(device.type)  # AMP scaler for mixed precision
 
     best_val_loss = float("inf")
     patience = 3
@@ -315,8 +334,8 @@ def do_train():
             input = input.to(device, non_blocking=True)
             labels_gt = labels_gt.to(device, non_blocking=True)
 
-            # with autocast(device_type=device.type):
-            logits = model(input).logits
+            with autocast(device_type=device.type):
+                logits = model(input).logits
 
             # upsample logits to match the input size
             logits_up = torch.nn.functional.interpolate(
@@ -325,19 +344,24 @@ def do_train():
                 mode="bilinear",
                 align_corners=False,
             )
-            loss = seg_loss_fn(logits_up, labels_gt)
+            with autocast(device_type=device.type):
+                loss = seg_loss_fn(logits_up, labels_gt)
+
+            # Alternatively can skip batch but let's see how it goes
+            if torch.isnan(loss):
+                raise ValueError("Loss is NaN")
 
             train_loss_sum += loss.item()
             train_batch_count += 1
 
             optimizer.zero_grad()
 
-            loss.backward()
-            optimizer.step()
+            # loss.backward()
+            # optimizer.step()
 
-            # scaler.scale(loss).backward()
-            # scaler.step(optimizer)
-            # scaler.update()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
         train_loss_avg = train_loss_sum / train_batch_count
         epoch_data["train_loss"] = train_loss_avg
@@ -363,8 +387,8 @@ def do_train():
                 input = input.to(device, non_blocking=True)
                 labels_gt = labels_gt.to(device, non_blocking=True)
 
-                # with autocast(device_type=device.type):
-                logits = model(input).logits
+                with autocast(device_type=device.type):
+                    logits = model(input).logits
 
                 # upsample logits to match the input size
                 logits_up = torch.nn.functional.interpolate(
@@ -373,7 +397,12 @@ def do_train():
                     mode="bilinear",
                     align_corners=False,
                 )
-                loss = seg_loss_fn(logits_up, labels_gt)
+                with autocast(device_type=device.type):
+                    loss = seg_loss_fn(logits_up, labels_gt)
+
+                if torch.isnan(loss):
+                    raise ValueError("Loss is NaN")
+
                 val_loss_sum += loss.item()
                 val_batch_count += 1
 

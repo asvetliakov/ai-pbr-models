@@ -55,7 +55,7 @@ Below, each phase is _self‑contained_.
 | **Epochs**             | 35                                                                                                                                 |
 | **Description**        | 35 epochs to build strong physics priors. Composites automatically create multi‑material masks for SegFormer.                      |
 | **Optimizer**          | `AdamW(lr 5e‑5→1e‑5)`                                                                                                              |
-| **Scheduler**          | `OneCycleLR(max_lr=5e‑5, pct_start=0.3)`                                                                                           |
+| **Scheduler**          | `OneCycleLR(max_lr=5e‑5, pct_start=0.15)`                                                                                          |
 | **Augment**            | flips, 90° rot, colour‑jitter; **composites (SegFormer only)**<br>  • 2‑crop 30 %<br>  • 4‑crop 15 %                               |
 | **SegFormer GT**       | composites know patch coordinates ⇒ auto mask                                                                                      |
 | **Curriculum crop**    | fixed 256 px                                                                                                                       |

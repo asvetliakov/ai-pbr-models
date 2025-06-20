@@ -135,10 +135,7 @@ class SimpleImageDataset(Dataset):
         """
         Calculate class weights and sample weights for the dataset.
         """
-        if self.split == "train":
-            samples = self.all_train_samples
-        else:
-            samples = self.all_validation_samples
+        samples = self.all_train_samples
 
         num_classes = len(self.CLASS_LIST)
         all_labels = [sample["category"] for sample in samples]
