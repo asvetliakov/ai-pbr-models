@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 import random
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from typing import Callable, Optional, Tuple
 
 
@@ -157,15 +157,10 @@ class SimpleImageDataset(Dataset):
             or len(self.all_validation_samples)
         )
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        samples = (
-            self.split == "train"
-            and self.all_train_samples
-            or self.all_validation_samples
-        )
-
-        sample = samples[idx]
-
+    def _process_sample(self, sample, call_tansform: bool) -> dict[str, torch.Tensor]:
+        """
+        Process a single sample by loading images and metadata.
+        """
         # Clone sample to avoid modifying the original
         sample = sample.copy()
         sample["metadata"] = open(
@@ -196,7 +191,31 @@ class SimpleImageDataset(Dataset):
         #     os.path.join(self.matsynth_input_dir, sample["specular"])
         # ).convert("RGB")
 
-        if self.transform:
+        if self.transform and call_tansform:
             sample = self.transform(sample)
+
+        return sample
+
+    def get_random_sample(self, call_transform=False) -> dict[str, torch.Tensor]:
+        samples = (
+            self.split == "train"
+            and self.all_train_samples
+            or self.all_validation_samples
+        )
+
+        idx = random.randint(0, len(samples) - 1)
+        sample = samples[idx]
+        sample = self._process_sample(sample, call_tansform=call_transform)
+        return sample
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        samples = (
+            self.split == "train"
+            and self.all_train_samples
+            or self.all_validation_samples
+        )
+
+        sample = samples[idx]
+        sample = self._process_sample(sample, call_tansform=True)
 
         return sample

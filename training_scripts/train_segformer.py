@@ -3,11 +3,14 @@ import seed
 import json, torch
 import numpy as np
 import multiprocessing
+import random
+from typing import Callable
 from pathlib import Path
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from PIL import Image
 from tqdm import tqdm
 from torchvision import transforms as T
+from torchvision.utils import save_image
 from torchvision.transforms import functional as TF
 from torchmetrics import functional as FM
 from transformers import (
@@ -20,6 +23,7 @@ from transformers.utils.constants import (
     IMAGENET_STANDARD_STD,
 )
 from train_dataset import SimpleImageDataset, normalize_normal_map
+from augmentations import get_random_crop, make_full_image_mask, selective_aug
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -174,65 +178,131 @@ transform_val_normal = T.Compose(
     ]
 )
 
+saved_images = 0
+img_test_dir = Path("./test_images")
 
-def synced_crop_and_resize(
-    albedo: Image.Image,
-    normal: Image.Image,
-    size: tuple[int, int],
-    resize_to: list[int],
-) -> tuple[Image.Image, Image.Image]:
-    """
-    Crop and resize two images to the same size.
-    """
-    i, j, h, w = T.RandomCrop.get_params(albedo, output_size=size)  # type: ignore
-
-    albedo_crop = TF.crop(albedo, i, j, h, w)  # type: ignore
-    normal_crop = TF.crop(normal, i, j, h, w)  # type: ignore
-
-    albedo_resize = TF.resize(
-        albedo_crop, resize_to, interpolation=T.InterpolationMode.LANCZOS
-    )
-    normal_resize = TF.resize(
-        normal_crop, resize_to, interpolation=T.InterpolationMode.BILINEAR
-    )
-    normal_resize = normalize_normal_map(normal_resize)  # type: ignore
-
-    # image not tensors
-    return albedo_resize, normal_resize  # type: ignore
+# For mask visualization
+# PALETTE = {
+#     0: (255, 198, 138),  # ceramic, Pale Orange
+#     1: (216, 27, 96),  # fabric, Raspberry
+#     2: (139, 195, 74),  # ground, Olive Green
+#     3: (141, 110, 99),  # leather, Saddle Brown
+#     4: (96, 125, 139),  # metal, Steel Blue
+#     5: (120, 144, 156),  # stone, Slate Gray
+#     6: (229, 115, 115),  # wood, Burnt Sienna
+# }
 
 
-def make_full_image_mask(category_id: int, img_size: tuple[int, int]) -> torch.Tensor:
-    """
-    Build a segmentation mask of shape (H, W) where every pixel = category_id.
-    """
-    H, W = img_size
-    # numpy array filled with your class index
-    mask_np = np.full((H, W), fill_value=category_id, dtype=np.int64)
-    # convert to torch LongTensor
-    return torch.from_numpy(mask_np)
+def get_transform_train(current_epoch: int, augmentations=True) -> Callable:
+    def transform_train_fn(example):
+        name = example["name"]
 
+        # Upper left corner tuple for each cro
+        positions = [(0, 0)]
+        # h, w
+        crop_size = (256, 256)
+        # h, w
+        tile_size = [1024, 1024]
+        samples = [example]
 
-def transform_train_fn(example):
-    albedo = example["basecolor"]
-    normal = example["normal"]
-    category = example["category"]
+        if augmentations:
+            # 15% chance of 4 random crops
+            if random.random() < 0.15:
+                positions = [(0, 0), (512, 0), (0, 512), (512, 512)]
+                tile_size = [512, 512]
+                crop_size = (256, 256)
+                samples = [
+                    example,
+                    train_dataset.get_random_sample(),
+                    train_dataset.get_random_sample(),
+                    train_dataset.get_random_sample(),
+                ]
+            # 30% chance of 2 random crops
+            elif random.random() < 0.3:
+                positions = [(0, 0), (512, 0)]
+                tile_size = [1024, 512]
+                crop_size = (512, 256)
+                samples = [
+                    example,
+                    train_dataset.get_random_sample(),
+                ]
 
-    albedo, normal = synced_crop_and_resize(
-        albedo, normal, size=(256, 256), resize_to=[1024, 1024]
-    )
-    albedo = transform_train(albedo)
-    normal = transform_train_normal(normal)
+        final_albedo = Image.new("RGB", (1024, 1024))
+        final_normal = Image.new("RGB", (1024, 1024))
+        final_mask = torch.zeros((1024, 1024), dtype=torch.int64)
+        final_color_mask = Image.new("RGB", (1024, 1024))
 
-    # Concatenate albedo and normal along the channel dimension
-    final = torch.cat((albedo, normal), dim=0)  # type: ignore
+        for sample, pos in zip(samples, positions):
+            albedo = sample["basecolor"]
+            normal = sample["normal"]
+            category = sample["category"]
+            category_name = sample["category_name"]
 
-    mask = make_full_image_mask(category_id=category, img_size=(1024, 1024))  # (H, W)
+            albedo, normal = get_random_crop(
+                albedo,
+                normal,
+                size=crop_size,
+                augmentations=augmentations,
+                resize_to=None,
+            )
+            if augmentations:
+                albedo, normal = selective_aug(
+                    albedo,
+                    normal,
+                    category=category_name,
+                )
 
-    return {
-        "pixel_values": final,
-        "labels": mask,
-        "category": category,  # keep for reference
-    }
+            albedo = TF.resize(
+                albedo, tile_size, interpolation=TF.InterpolationMode.LANCZOS  # type: ignore
+            )
+            normal = TF.resize(
+                normal, tile_size, interpolation=TF.InterpolationMode.BILINEAR  # type: ignore
+            )
+            normal = normalize_normal_map(normal)  # type: ignore
+
+            final_albedo.paste(albedo, box=pos)  # type: ignore
+            final_normal.paste(normal, box=pos)  # type: ignore
+
+            mask = make_full_image_mask(
+                category_id=category,
+                # height comes first
+                img_size=(tile_size[0], tile_size[1]),
+            )  # (H, W)
+
+            final_mask[
+                pos[1] : pos[1] + tile_size[0], pos[0] : pos[0] + tile_size[1]
+            ] = mask
+
+            # Mask visualization
+            # color_mask = np.zeros((tile_size[0], tile_size[1], 3), dtype=np.uint8)
+            # color_cat = PALETTE[category]  # type: ignore
+            # color_mask[:, :] = color_cat  # type: ignore
+            # final_color_mask.paste(
+            #     Image.fromarray(color_mask, mode="RGB"), box=pos  # type: ignore
+            # )
+
+        # visual_check = Image.new("RGB", (2048, 1024))
+        # visual_check.paste(final_albedo, (0, 0))  # type: ignore
+        # visual_check.paste(final_color_mask, (1024, 0))  # type: ignore
+        # visual_check.paste(final_normal, (1024, 0))  # type: ignore
+        # img_test_dir.mkdir(parents=True, exist_ok=True)
+        # visual_check.save(
+        #     img_test_dir / f"{name}.png",
+        # )
+
+        final_albedo = transform_train(final_albedo)
+        final_normal = transform_train_normal(final_normal)
+
+        # Concatenate albedo and normal along the channel dimension
+        final_sample = torch.cat((final_albedo, final_normal), dim=0)  # type: ignore
+
+        return {
+            "pixel_values": final_sample,
+            "labels": final_mask,
+            # "category": category,  # keep for reference
+        }
+
+    return transform_train_fn
 
 
 def transform_val_fn(example):
@@ -260,10 +330,6 @@ def transform_val_fn(example):
         "labels": mask,
         "category": category,  # keep for reference
     }
-
-
-train_dataset.set_transform(transform_train_fn)
-validation_dataset.set_transform(transform_val_fn)
 
 
 # Training loop
@@ -309,6 +375,12 @@ def do_train():
 
     for epoch in range(EPOCHS):
         model.train()
+
+        train_dataset.set_transform(
+            # Train first 5 epochs without augmentations
+            get_transform_train(epoch + 1, augmentations=epoch >= 5)
+        )
+        validation_dataset.set_transform(transform_val_fn)
 
         # For IoU
         # ! need to reest it here early due to GPU memory issues
