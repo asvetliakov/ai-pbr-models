@@ -55,10 +55,9 @@ train_dataset = SimpleImageDataset(
 validation_dataset = SimpleImageDataset(
     matsynth_dir=str(matsynth_dir),
     split="validation",
+    skip_init=True,
 )
-# Phase A0 temp since using max_train_samples_per_cat, otherwise it deterministic
-# validation_dataset.all_train_samples = train_dataset.all_train_samples
-# validation_dataset.all_validation_samples = train_dataset.all_validation_samples
+validation_dataset.all_validation_samples = train_dataset.all_validation_samples
 
 loss_weights, sample_weights = train_dataset.get_weights()
 
@@ -137,23 +136,11 @@ def center_crop(
     return resized  # type: ignore
 
 
-saved_images = 0
-img_test_dir = Path("./test_images")
-
-# For mask visualization
-# PALETTE = {
-#     0: (255, 198, 138),  # ceramic, Pale Orange
-#     1: (216, 27, 96),  # fabric, Raspberry
-#     2: (139, 195, 74),  # ground, Olive Green
-#     3: (141, 110, 99),  # leather, Saddle Brown
-#     4: (96, 125, 139),  # metal, Steel Blue
-#     5: (120, 144, 156),  # stone, Slate Gray
-#     6: (229, 115, 115),  # wood, Burnt Sienna
-# }
-
-
 def get_transform_train(
-    current_epoch: int, augmentations=True, color_augmentations=True
+    current_epoch: int,
+    safe_augmentations=True,
+    composites=True,
+    color_augmentations=True,
 ) -> Callable:
     def transform_train_fn(example):
         # name = example["name"]
@@ -166,7 +153,7 @@ def get_transform_train(
         tile_size = [1024, 1024]
         samples = [example]
 
-        if augmentations:
+        if composites:
             # 15% chance of 4 random crops
             if random.random() < 0.15:
                 positions = [(0, 0), (512, 0), (0, 512), (512, 512)]
@@ -203,7 +190,7 @@ def get_transform_train(
                 albedo,
                 normal,
                 size=crop_size,
-                augmentations=augmentations,
+                augmentations=safe_augmentations,
                 resize_to=None,
             )
             if color_augmentations:
@@ -351,7 +338,8 @@ def do_train():
             get_transform_train(
                 epoch + 1,
                 # Composites & flips are enabled from epoch 1
-                augmentations=True,
+                safe_augmentations=True,
+                composites=True,
                 # Color augmentations are enabled after warm-up (from epoch 6)
                 color_augmentations=(epoch + 1) > 5,
             )

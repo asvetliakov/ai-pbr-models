@@ -44,6 +44,7 @@ class SimpleImageDataset(Dataset):
         split: str = "train",
         # Used for A0 phase, set to 144
         max_train_samples_per_cat: Optional[int] = None,
+        skip_init=False,
     ):
         """
         Args:
@@ -64,6 +65,16 @@ class SimpleImageDataset(Dataset):
             "stone",
             "wood",
         ]
+        # For mask visualization
+        self.CLASS_PALETTE = {
+            0: (255, 198, 138),  # ceramic, Pale Orange
+            1: (216, 27, 96),  # fabric, Raspberry
+            2: (139, 195, 74),  # ground, Olive Green
+            3: (141, 110, 99),  # leather, Saddle Brown
+            4: (96, 125, 139),  # metal, Steel Blue
+            5: (120, 144, 156),  # stone, Slate Gray
+            6: (229, 115, 115),  # wood, Burnt Sienna
+        }
         self.CLASS_LIST_IDX_MAPPING = {
             name: idx for idx, name in enumerate(self.CLASS_LIST)
         }
@@ -71,6 +82,9 @@ class SimpleImageDataset(Dataset):
 
         self.all_train_samples = []
         self.all_validation_samples = []
+
+        if skip_init:
+            return
 
         sample_names_per_category = {name: [] for name in self.CLASS_LIST}
 
@@ -86,13 +100,10 @@ class SimpleImageDataset(Dataset):
         for category, names in sample_names_per_category.items():
             names = sorted(names)
             n = len(names)
-            # 5% for validation
-            n_val = max(1, int(0.05 * n))
+            # 10% for validation
+            n_val = max(1, int(0.1 * n))
 
-            # torch data loaders are shuffling by default but for restricted dataset size
-            # we want to also shuffle it here to avoid bias in sampling
-            if max_train_samples_per_cat is not None:
-                random.shuffle(names)
+            random.shuffle(names)
 
             samples = list(
                 map(
@@ -127,6 +138,8 @@ class SimpleImageDataset(Dataset):
 
             self.all_validation_samples.extend(validation_samples)
             self.all_train_samples.extend(train_samples)
+            random.shuffle(self.all_validation_samples)
+            random.shuffle(self.all_train_samples)
 
     def set_transform(self, transform: Callable) -> None:
         self.transform = transform
