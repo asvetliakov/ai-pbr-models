@@ -152,7 +152,9 @@ img_test_dir = Path("./test_images")
 # }
 
 
-def get_transform_train(current_epoch: int, augmentations=True) -> Callable:
+def get_transform_train(
+    current_epoch: int, augmentations=True, color_augmentations=True
+) -> Callable:
     def transform_train_fn(example):
         # name = example["name"]
 
@@ -204,7 +206,7 @@ def get_transform_train(current_epoch: int, augmentations=True) -> Callable:
                 augmentations=augmentations,
                 resize_to=None,
             )
-            if augmentations:
+            if color_augmentations:
                 albedo, normal = selective_aug(
                     albedo,
                     normal,
@@ -346,8 +348,13 @@ def do_train():
         model.train()
 
         train_dataset.set_transform(
-            # Train first 5 epochs without augmentations
-            get_transform_train(epoch + 1, augmentations=epoch >= 5)
+            get_transform_train(
+                epoch + 1,
+                # Composites & flips are enabled from epoch 1
+                augmentations=True,
+                # Color augmentations are enabled after warm-up (from epoch 6)
+                color_augmentations=(epoch + 1) > 5,
+            )
         )
         validation_dataset.set_transform(transform_val_fn)
 

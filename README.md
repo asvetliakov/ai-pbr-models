@@ -64,8 +64,6 @@ Below, each phase is _self‑contained_.
 | **Gate**               | proceed when losses plateau < 4 epochs                                                                                             |
 | **Advice**             | Over‑fitting shows as LPIPS ↑ while L1 ↓. Stop early if that happens.                                                              |
 
-Run first 5 epochs without augmentation & crops
-
 ### Unet-maps loss table
 
 | Map           | Range        | Loss terms                                                   |
