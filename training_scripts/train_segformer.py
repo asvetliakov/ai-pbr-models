@@ -336,7 +336,7 @@ def do_train():
     scaler = GradScaler(device.type)  # AMP scaler for mixed precision
 
     best_val_loss = float("inf")
-    patience = 3
+    patience = 4
     no_improvement_count = 0
 
     output_dir = Path(f"./weights/{PHASE}/segformer")
