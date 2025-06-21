@@ -151,10 +151,13 @@ def get_transform_train(
             augmentations=safe_augmentations,
         )
 
+        albedo_orig = albedo.copy()
+        albedo_aug = albedo
+
         if color_augmentations:
-            albedo, normal = selective_aug(
-                albedo=albedo, normal=normal, category=category_name
-            )
+            diffuse = selective_aug(diffuse, category=category_name)
+            # For teacher mode
+            albedo_aug = selective_aug(albedo, category=category_name)
 
         mask = make_full_image_mask(category, img_size=(1024, 1024))
         # Store normal for later visualization
@@ -172,7 +175,9 @@ def get_transform_train(
         # Concatenate albedo and normal along the channel dimension
         diffuse_and_normal = torch.cat((diffuse, normal), dim=0)  # type: ignore
 
-        albedo = TF.to_tensor(albedo)  # type: ignore
+        albedo_orig = TF.to_tensor(albedo_orig)  # type: ignore
+        # ! Note we normalize to standard mean/std inside training loop
+        albedo_aug = TF.to_tensor(albedo_aug)  # type: ignore
 
         # to_tensor() is normalizing 8 bit images ( / 255 ) so for 16bit we need to do it manually
         height_arr = np.array(height, dtype=np.uint16)
@@ -186,7 +191,8 @@ def get_transform_train(
         return {
             "diffuse_and_normal": diffuse_and_normal,
             "height": height,
-            "albedo": albedo,
+            "albedo_aug": albedo_aug,
+            "albedo_orig": albedo_orig,
             "normal": normal,
             "metallic": metallic,
             "roughness": roughness,
@@ -643,7 +649,8 @@ def do_train():
             diffuse_and_normal = batch["diffuse_and_normal"]
             normal = batch["normal"]
             category = batch["category"]
-            albedo_gt = batch["albedo"]
+            albedo_gt = batch["albedo_orig"]
+            albedo_aug = batch["albedo_aug"]
             height = batch["height"]
             metallic = batch["metallic"]
             roughness = batch["roughness"]
@@ -653,6 +660,7 @@ def do_train():
             diffuse_and_normal = diffuse_and_normal.to(device, non_blocking=True)
             normal = normal.to(device, non_blocking=True)
             albedo_gt = albedo_gt.to(device, non_blocking=True)
+            albedo_aug = albedo_aug.to(device, non_blocking=True)
             height = height.to(device, non_blocking=True)
             metallic = metallic.to(device, non_blocking=True)
             roughness = roughness.to(device, non_blocking=True)
@@ -667,8 +675,8 @@ def do_train():
 
             # Get albedo input for UNet-maps
             if epoch < teacher_epochs:
-                # predirected albedo is not good enough in earlier phases on early epochs so use GT albedo
-                unet_maps_input_albedo = albedo_gt
+                # predirected albedo is not good enough in earlier phases on early epochs so use GT albedo (potentially augmented)
+                unet_maps_input_albedo = albedo_aug
             else:
                 # Joint finetuning only in some phases
                 unet_maps_input_albedo = (
@@ -743,7 +751,8 @@ def do_train():
                 validation_loader, desc=f"Epoch {epoch + 1}/{EPOCHS} - Validation"
             ):
                 diffuse_and_normal = batch["diffuse_and_normal"]
-                albedo_gt = batch["albedo"]
+                albedo_gt = batch["albedo_orig"]
+                albedo_aug = batch["albedo_aug"]
                 normal = batch["normal"]
                 category = batch["category"]
                 height = batch["height"]
@@ -758,6 +767,7 @@ def do_train():
                 diffuse_and_normal = diffuse_and_normal.to(device, non_blocking=True)
                 normal = normal.to(device, non_blocking=True)
                 albedo_gt = albedo_gt.to(device, non_blocking=True)
+                albedo_aug = albedo_aug.to(device, non_blocking=True)
                 height = height.to(device, non_blocking=True)
                 metallic = metallic.to(device, non_blocking=True)
                 roughness = roughness.to(device, non_blocking=True)

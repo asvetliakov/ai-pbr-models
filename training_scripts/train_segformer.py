@@ -221,11 +221,7 @@ def get_transform_train(
                 resize_to=None,
             )
             if color_augmentations:
-                albedo, normal = selective_aug(
-                    albedo,
-                    normal,
-                    category=category_name,
-                )
+                albedo = selective_aug(albedo, category=category_name)
 
             albedo = TF.resize(
                 albedo, tile_size, interpolation=TF.InterpolationMode.LANCZOS  # type: ignore

@@ -361,24 +361,24 @@ def overlay_specular(
 #     )
 
 
-def selective_aug(albedo, normal, category: str):
+def selective_aug(image, category: str):
     if category == "wood":
         if random.random() < 0.5:
-            albedo = TF.adjust_brightness(
-                albedo, brightness_factor=random.uniform(0.9, 1.1)
+            image = TF.adjust_brightness(
+                image, brightness_factor=random.uniform(0.9, 1.1)
             )
         if random.random() < 0.5:
-            albedo = TF.adjust_hue(albedo, hue_factor=random.uniform(-0.05, 0.05))
+            image = TF.adjust_hue(image, hue_factor=random.uniform(-0.05, 0.05))
         if random.random() < 0.3:
-            albedo = overlay_grain(albedo, strength=random.uniform(0.05, 0.10))  # type: ignore
+            image = overlay_grain(image, strength=random.uniform(0.05, 0.10))  # type: ignore
     elif category == "stone":
         if random.random() < 0.5:
-            albedo = TF.adjust_brightness(
-                albedo, brightness_factor=random.uniform(0.92, 1.08)
+            image = TF.adjust_brightness(
+                image, brightness_factor=random.uniform(0.92, 1.08)
             )
         if random.random() < 0.3:
-            albedo = overlay_dirt(
-                albedo,  # type: ignore
+            image = overlay_dirt(
+                image,  # type: ignore
                 strength=random.uniform(0.1, 0.25),  # dirt opacity 10–25%
                 scale=random.uniform(200, 400),  # size of dirt blobs
                 octaves=4,
@@ -387,14 +387,14 @@ def selective_aug(albedo, normal, category: str):
             )
     elif category == "metal":
         if random.random() < 0.3:
-            albedo = overlay_specular(
-                albedo,
+            image = overlay_specular(
+                image,
                 radius=random.uniform(0.1, 0.2),  # spot size 10–20% of width
                 strength=random.uniform(0.1, 0.2),  # opacity 10–20%
             )
     elif category == "fabric":
         if random.random() < 0.5:
-            albedo = TF.adjust_hue(albedo, hue_factor=random.uniform(-0.12, 0.12))
+            image = TF.adjust_hue(image, hue_factor=random.uniform(-0.12, 0.12))
         # not worth headache for now
         # if random.random() < 0.3:
         #     alb_np = np.array(albedo)
@@ -404,27 +404,27 @@ def selective_aug(albedo, normal, category: str):
         #     normal = Image.fromarray(data["mask"])
     elif category == "leather":
         if random.random() < 0.5:
-            albedo = TF.adjust_brightness(
-                albedo, brightness_factor=random.uniform(0.88, 1.12)
+            image = TF.adjust_brightness(
+                image, brightness_factor=random.uniform(0.88, 1.12)
             )
         if random.random() < 0.5:
-            albedo = TF.adjust_hue(albedo, hue_factor=random.uniform(-0.08, 0.08))
+            image = TF.adjust_hue(image, hue_factor=random.uniform(-0.08, 0.08))
     # Ground, cermaic
     else:
         if random.random() < 0.5:
-            albedo = TF.adjust_brightness(
-                albedo, brightness_factor=random.uniform(0.9, 1.1)
+            image = TF.adjust_brightness(
+                image, brightness_factor=random.uniform(0.9, 1.1)
             )
         if random.random() < 0.3:
-            albedo = overlay_dirt(
-                albedo,  # type: ignore
+            image = overlay_dirt(
+                image,  # type: ignore
                 strength=random.uniform(0.10, 0.20),  # 10–20% opacity of the dirt
                 scale=random.uniform(300.0, 600.0),  # controls blob size
                 octaves=4,  # number of noise layers
                 persistence=0.5,  # contrast of layers
                 lacunarity=2.0,  # frequency multiplier between octaves
             )
-    return albedo, normal
+    return image
 
 
 def make_full_image_mask(category_id: int, img_size: tuple[int, int]) -> torch.Tensor:
