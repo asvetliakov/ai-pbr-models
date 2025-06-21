@@ -372,8 +372,8 @@ def do_train():
 
     start_epoch = 0
     if best_model_checkpoint is not None and resume_training:
-        print(f"Resuming training from epoch {start_epoch}.")
         start_epoch = best_model_checkpoint["epoch"]
+        print(f"Resuming training from epoch {start_epoch}.")
 
     for epoch in range(start_epoch, EPOCHS):
         model.train()
