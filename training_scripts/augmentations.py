@@ -29,9 +29,22 @@ def get_random_crop(
     albedo: Image.Image,
     normal: Image.Image,
     size: tuple[int, int],
-    resize_to: Optional[list[int]],
+    diffuse: Optional[Image.Image] = None,
+    height: Optional[Image.Image] = None,
+    metallic: Optional[Image.Image] = None,
+    roughness: Optional[Image.Image] = None,
+    ao: Optional[Image.Image] = None,
+    resize_to: Optional[list[int]] = None,
     augmentations: Optional[bool] = True,
-) -> tuple[Image.Image, Image.Image]:
+) -> tuple[
+    Image.Image,
+    Image.Image,
+    Optional[Image.Image],
+    Optional[Image.Image],
+    Optional[Image.Image],
+    Optional[Image.Image],
+    Optional[Image.Image],
+]:
     """
     Crop and resize two images to the same size.
     """
@@ -39,15 +52,50 @@ def get_random_crop(
 
     final_albedo = TF.crop(albedo, i, j, h, w)  # type: ignore
     final_normal = TF.crop(normal, i, j, h, w)  # type: ignore
+    final_diffuse = (
+        TF.crop(diffuse, i, j, h, w) if diffuse is not None else None  # type: ignore
+    )
+    final_height = (
+        TF.crop(height, i, j, h, w) if height is not None else None  # type: ignore
+    )
+    final_metallic = (
+        TF.crop(metallic, i, j, h, w) if metallic is not None else None  # type: ignore
+    )
+    final_roughness = (
+        TF.crop(roughness, i, j, h, w) if roughness is not None else None  # type: ignore
+    )
+    final_ao = TF.crop(ao, i, j, h, w) if ao is not None else None  # type: ignore
 
     if augmentations:
         if random.random() < 0.5:
             final_albedo = TF.hflip(final_albedo)
             final_normal = TF.hflip(final_normal)
+            final_diffuse = (
+                TF.hflip(final_diffuse) if final_diffuse is not None else None
+            )
+            final_height = TF.hflip(final_height) if final_height is not None else None
+            final_metallic = (
+                TF.hflip(final_metallic) if final_metallic is not None else None
+            )
+            final_roughness = (
+                TF.hflip(final_roughness) if final_roughness is not None else None
+            )
+            final_ao = TF.hflip(final_ao) if final_ao is not None else None
 
         if random.random() < 0.5:
             final_albedo = TF.vflip(final_albedo)
             final_normal = TF.vflip(final_normal)
+            final_diffuse = (
+                TF.vflip(final_diffuse) if final_diffuse is not None else None
+            )
+            final_height = TF.vflip(final_height) if final_height is not None else None
+            final_metallic = (
+                TF.vflip(final_metallic) if final_metallic is not None else None
+            )
+            final_roughness = (
+                TF.vflip(final_roughness) if final_roughness is not None else None
+            )
+            final_ao = TF.vflip(final_ao) if final_ao is not None else None
 
         # if random.random() < 0.5:
         # Don't try to rotate if the size is not square
@@ -55,6 +103,29 @@ def get_random_crop(
             k = random.randint(0, 3)
             final_albedo = TF.rotate(final_albedo, angle=k * 90)
             final_normal = TF.rotate(final_normal, angle=k * 90)
+            final_diffuse = (
+                TF.rotate(final_diffuse, angle=k * 90)
+                if final_diffuse is not None
+                else None
+            )
+            final_height = (
+                TF.rotate(final_height, angle=k * 90)
+                if final_height is not None
+                else None
+            )
+            final_metallic = (
+                TF.rotate(final_metallic, angle=k * 90)
+                if final_metallic is not None
+                else None
+            )
+            final_roughness = (
+                TF.rotate(final_roughness, angle=k * 90)
+                if final_roughness is not None
+                else None
+            )
+            final_ao = (
+                TF.rotate(final_ao, angle=k * 90) if final_ao is not None else None
+            )
 
     if resize_to is not None:
         final_albedo = TF.resize(
@@ -64,9 +135,42 @@ def get_random_crop(
             final_normal, resize_to, interpolation=TF.InterpolationMode.BILINEAR
         )
         final_normal = normalize_normal_map(final_normal)  # type: ignore
+        final_diffuse = (
+            TF.resize(
+                final_diffuse, resize_to, interpolation=TF.InterpolationMode.LANCZOS
+            )
+            if final_diffuse is not None
+            else None
+        )
+        final_height = (
+            TF.resize(
+                final_height, resize_to, interpolation=TF.InterpolationMode.BICUBIC
+            )
+            if final_height is not None
+            else None
+        )
+        final_metallic = (
+            TF.resize(
+                final_metallic, resize_to, interpolation=TF.InterpolationMode.BILINEAR
+            )
+            if final_metallic is not None
+            else None
+        )
+        final_roughness = (
+            TF.resize(
+                final_roughness, resize_to, interpolation=TF.InterpolationMode.BILINEAR
+            )
+            if final_roughness is not None
+            else None
+        )
+        final_ao = (
+            TF.resize(final_ao, resize_to, interpolation=TF.InterpolationMode.BILINEAR)
+            if final_ao is not None
+            else None
+        )
 
     # image not tensors
-    return final_albedo, final_normal  # type: ignore
+    return final_albedo, final_normal, final_diffuse, final_height, final_metallic, final_roughness, final_ao  # type: ignore
 
 
 def make_grain_noise(mask_size: tuple[int, int], strength: float = 0.05) -> Image.Image:

@@ -213,7 +213,7 @@ def get_transform_train(
             category = sample["category"]
             category_name = sample["category_name"]
 
-            albedo, normal = get_random_crop(
+            albedo, normal, *_ = get_random_crop(
                 albedo,
                 normal,
                 size=crop_size,

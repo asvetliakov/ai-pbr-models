@@ -6,30 +6,63 @@ import random
 import multiprocessing
 import torch.nn.functional as F
 import lpips
+import argparse
+from typing import Callable
 from unet_models import UNetAlbedo, UNetMaps
 from pathlib import Path
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from PIL import Image
 from tqdm import tqdm
-from torchvision import transforms as T
 from torchvision.utils import save_image
 from torchvision.transforms import functional as TF
 from torchmetrics import functional as FM
 from transformers.utils.constants import IMAGENET_STANDARD_MEAN, IMAGENET_STANDARD_STD
 from train_dataset import SimpleImageDataset, normalize_normal_map
+from augmentations import (
+    get_random_crop,
+    make_full_image_mask,
+    selective_aug,
+    center_crop,
+)
 
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
 
 BASE_DIR = Path(__file__).resolve().parent
 
+parser = argparse.ArgumentParser(
+    description="Train Segformer for Semantic Segmentation"
+)
+parser.add_argument(
+    "--phase",
+    type=str,
+    default="a",
+    help="Phase of the training per plan, used for logging and saving",
+)
+parser.add_argument(
+    "--load_checkpoint",
+    type=str,
+    default=None,
+    help="Path to the checkpoint to load the model from",
+)
+
+parser.add_argument(
+    "--resume",
+    type=bool,
+    default=False,
+    help="Whether to resume training from the last checkpoint",
+)
+
+args = parser.parse_args()
+print(f"Training phase: {args.phase}")
+
 # HYPER_PARAMETERS
 BATCH_SIZE = 2  # Batch size for training
-EPOCHS = 10  # Number of epochs to train
-LR = 1e-4  # Learning rate for the optimizer
+EPOCHS = 35  # Number of epochs to train
+LR = 5e-5  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
-T_MAX = 10  # Max number of epochs for the learning rate scheduler
-PHASE = "a0"  # Phase of the training per plan, used for logging and saving
+# T_MAX = 10  # Max number of epochs for the learning rate scheduler
+PHASE = args.phase  # Phase of the training per plan, used for logging and saving
 
 # Enable TF32 for faster training on Ampere GPUs
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -41,31 +74,21 @@ matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
 train_dataset = SimpleImageDataset(
     matsynth_dir=str(matsynth_dir),
     split="train",
-    max_train_samples_per_cat=144,  # For Phase A0
 )
 
 validation_dataset = SimpleImageDataset(
-    matsynth_dir=str(matsynth_dir),
-    split="validation",
+    matsynth_dir=str(matsynth_dir), split="validation", skip_init=True
 )
-# Phase A0 temp since using max_train_samples_per_cat, otherwise it deterministic
-validation_dataset.all_train_samples = train_dataset.all_train_samples
+
 validation_dataset.all_validation_samples = train_dataset.all_validation_samples
-
-# ! DISABLED FOR PHASE A0, REENABLE FOR PHASE A+
-# Sample weights for each class
-# sample_weighs_per_class = 1.0 / (cls_counts + 1e-6)
-# sample_weights = sample_weighs_per_class[all_labels]
-
-# print("Sample weights per class:", sample_weighs_per_class)
-# print("Sample weights:", sample_weights)
+loss_weights, sample_weights = train_dataset.get_weights()
 
 # # Will pull random samples according to the sample weights
-# train_sampler = WeightedRandomSampler(
-#     weights=sample_weights.tolist(),
-#     num_samples=len(sample_weights),
-#     replacement=True,
-# )
+train_sampler = WeightedRandomSampler(
+    weights=sample_weights.tolist(),
+    num_samples=len(sample_weights),
+    replacement=True,
+)
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -84,181 +107,96 @@ unet_maps = UNetMaps(
     device
 )  # type: ignore
 
-transform_train_input = T.Compose(
-    [
-        T.ToTensor(),
-        T.Normalize(
-            mean=IMAGENET_STANDARD_MEAN,
-            std=IMAGENET_STANDARD_STD,
-        ),
-    ]
-)
-transform_train_gt = T.Compose(
-    [
-        T.ToTensor(),
-    ]
-)
-
-
-def center_crop(
-    image: Image.Image,
-    size: tuple[int, int],
-    resize_to: list[int],
-    interpolation: T.InterpolationMode,
-) -> Image.Image:
-    crop = TF.center_crop(image, size)  # type: ignore
-    resized = TF.resize(crop, resize_to, interpolation=interpolation)  # type: ignore
-    return resized  # type: ignore
-
-
-transform_validation_input = T.Compose(
-    [
-        # Need to use same crop size for validation
-        T.ToTensor(),
-        T.Normalize(
-            mean=IMAGENET_STANDARD_MEAN,
-            std=IMAGENET_STANDARD_STD,
-        ),
-    ]
-)
-
-transform_validation_gt = T.Compose(
-    [
-        T.ToTensor(),
-    ]
-)
-
-
-def synced_crop_and_resize(
-    diffuse: Image.Image,
-    normal: Image.Image,
-    albedo: Image.Image,
-    height: Image.Image,
-    metallic: Image.Image,
-    roughness: Image.Image,
-    ao: Image.Image,
-    crop_size: tuple[int, int],
-    resize_to: list[int],
-) -> tuple[
-    Image.Image,
-    Image.Image,
-    Image.Image,
-    Image.Image,
-    Image.Image,
-    Image.Image,
-    Image.Image,
-]:
-    """
-    Crop and resize two images to the same size.
-    """
-    i, j, h, w = T.RandomCrop.get_params(diffuse, output_size=crop_size)  # type: ignore
-
-    diffuse_crop = TF.crop(diffuse, i, j, h, w)  # type: ignore
-    albedo_crop = TF.crop(albedo, i, j, h, w)  # type: ignore
-    normal_crop = TF.crop(normal, i, j, h, w)  # type: ignore
-    height_crop = TF.crop(height, i, j, h, w)  # type: ignore
-    metallic_crop = TF.crop(metallic, i, j, h, w)  # type: ignore
-    roughness_crop = TF.crop(roughness, i, j, h, w)  # type: ignore
-    ao_crop = TF.crop(ao, i, j, h, w)  # type: ignore
-
-    diffuse_resize = TF.resize(
-        diffuse_crop, resize_to, interpolation=T.InterpolationMode.LANCZOS
+resume_training = args.resume
+if (args.load_checkpoint is not None) and Path(args.load_checkpoint).resolve().exists():
+    load_checkpoint_path = Path(args.load_checkpoint).resolve()
+    print(
+        f"Loading model from checkpoint: {load_checkpoint_path}, resume={resume_training}"
     )
-    albedo_resize = TF.resize(
-        albedo_crop, resize_to, interpolation=T.InterpolationMode.LANCZOS
-    )
-    normal_resize = normalize_normal_map(TF.resize(normal_crop, resize_to, interpolation=T.InterpolationMode.BILINEAR))  # type: ignore
-    height_resize = TF.resize(
-        height_crop, resize_to, interpolation=T.InterpolationMode.BICUBIC
-    )
-    metallic_resize = TF.resize(
-        metallic_crop, resize_to, interpolation=T.InterpolationMode.BILINEAR
-    )
-    roughness_resize = TF.resize(
-        roughness_crop, resize_to, interpolation=T.InterpolationMode.BILINEAR
-    )
-    ao_resize = TF.resize(
-        ao_crop, resize_to, interpolation=T.InterpolationMode.BILINEAR
-    )
+    checkpoint = torch.load(load_checkpoint_path, map_location=device)
 
-    # image not tensors
-    return (
-        diffuse_resize,
-        normal_resize,
-        albedo_resize,
-        height_resize,
-        metallic_resize,
-        roughness_resize,
-        ao_resize,
-    )  # type: ignore
+if checkpoint is not None:
+    print("Loading model weights from checkpoint...")
+    unet_alb.load_state_dict(checkpoint["unet_albedo_model_state_dict"])
+    unet_maps.load_state_dict(checkpoint["unet_maps_model_state_dict"])
 
 
-def make_full_image_mask(category_id: int, img_size: tuple[int, int]) -> torch.Tensor:
-    """
-    Build a segmentation mask of shape (H, W) where every pixel = category_id.
-    """
-    H, W = img_size
-    # numpy array filled with your class index
-    mask_np = np.full((H, W), fill_value=category_id, dtype=np.int64)
-    # convert to torch LongTensor
-    return torch.from_numpy(mask_np)
+def get_transform_train(
+    current_epoch: int,
+    safe_augmentations=True,
+    color_augmentations=True,
+) -> Callable:
+    def transform_train_fn(example):
+        albedo = example["basecolor"]
+        normal = example["normal"]
+        height = example["height"]
+        metallic = example["metallic"]
+        roughness = example["roughness"]
+        diffuse = example["diffuse"]
+        ao = example["ao"]
+        category = example["category"]
+        category_name = example["category_name"]
+        name = example["name"]
 
+        albedo, normal, diffuse, height, metallic, roughness, ao = get_random_crop(
+            albedo=albedo,
+            normal=normal,
+            size=(256, 256),  # Crop size for training
+            diffuse=diffuse,
+            height=height,
+            metallic=metallic,
+            roughness=roughness,
+            ao=ao,
+            resize_to=[1024, 1024],  # Resize to 1024x1024 for training
+            augmentations=safe_augmentations,
+        )
 
-def transform_train_fn(example):
-    albedo = example["basecolor"]
-    normal = example["normal"]
-    height = example["height"]
-    metallic = example["metallic"]
-    roughness = example["roughness"]
-    diffuse = example["diffuse"]
-    ao = example["ao"]
-    category = example["category"]
-    name = example["name"]
+        if color_augmentations:
+            albedo, normal = selective_aug(
+                albedo=albedo, normal=normal, category=category_name
+            )
 
-    diffuse, normal, albedo, height, metallic, roughness, ao = synced_crop_and_resize(
-        diffuse,
-        normal,
-        albedo,
-        height,
-        metallic,
-        roughness,
-        ao,
-        crop_size=(256, 256),  # Crop size for training
-        resize_to=[1024, 1024],  # Resize to 1024x1024 for training
-    )
+        mask = make_full_image_mask(category, img_size=(1024, 1024))
+        # Store normal for later visualization
 
-    mask = make_full_image_mask(category, img_size=(1024, 1024))
-    # Store normal for later visualization
+        diffuse = TF.to_tensor(diffuse)  # type: ignore
+        diffuse = TF.normalize(
+            diffuse, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
+        )
 
-    diffuse = transform_train_input(diffuse)
-    normal = transform_train_input(normal)
+        normal = TF.to_tensor(normal)  # type: ignore
+        normal = TF.normalize(
+            normal, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
+        )
 
-    # Concatenate albedo and normal along the channel dimension
-    diffuse_and_normal = torch.cat((diffuse, normal), dim=0)  # type: ignore
+        # Concatenate albedo and normal along the channel dimension
+        diffuse_and_normal = torch.cat((diffuse, normal), dim=0)  # type: ignore
 
-    albedo = transform_train_gt(albedo)
+        albedo = TF.to_tensor(albedo)  # type: ignore
 
-    # ToTensor() is normalizing 8 bit images ( / 255 ) so for 16bit we need to do it manually
-    height_arr = np.array(height, dtype=np.uint16)
-    height_arr = height_arr.astype(np.float32) / 65535.0  # Normalize to [0, 1]
-    height = torch.from_numpy(height_arr).unsqueeze(0)
+        # to_tensor() is normalizing 8 bit images ( / 255 ) so for 16bit we need to do it manually
+        height_arr = np.array(height, dtype=np.uint16)
+        height_arr = height_arr.astype(np.float32) / 65535.0  # Normalize to [0, 1]
+        height = torch.from_numpy(height_arr).unsqueeze(0)
 
-    metallic = transform_train_gt(metallic)
-    roughness = transform_train_gt(roughness)
-    ao = transform_train_gt(ao)
+        metallic = TF.to_tensor(metallic)  # type: ignore
+        roughness = TF.to_tensor(roughness)  # type: ignore
+        ao = TF.to_tensor(ao)  # type: ignore
 
-    return {
-        "diffuse_and_normal": diffuse_and_normal,
-        "height": height,
-        "albedo": albedo,
-        "normal": normal,
-        "metallic": metallic,
-        "roughness": roughness,
-        "ao": ao,
-        "masks": mask,
-        "category": category,
-        "name": name,
-    }
+        return {
+            "diffuse_and_normal": diffuse_and_normal,
+            "height": height,
+            "albedo": albedo,
+            "normal": normal,
+            "metallic": metallic,
+            "roughness": roughness,
+            "ao": ao,
+            "masks": mask,
+            "category": category,
+            "name": name,
+        }
+
+    return transform_train_fn
 
 
 def transform_val_fn(example):
@@ -279,13 +217,13 @@ def transform_val_fn(example):
         albedo,
         size=(256, 256),
         resize_to=[1024, 1024],
-        interpolation=T.InterpolationMode.LANCZOS,
+        interpolation=TF.InterpolationMode.LANCZOS,
     )
     diffuse = center_crop(
         diffuse,
         size=(256, 256),
         resize_to=[1024, 1024],
-        interpolation=T.InterpolationMode.LANCZOS,
+        interpolation=TF.InterpolationMode.LANCZOS,
     )
 
     normal = normalize_normal_map(
@@ -293,52 +231,57 @@ def transform_val_fn(example):
             normal,
             size=(256, 256),
             resize_to=[1024, 1024],
-            interpolation=T.InterpolationMode.BILINEAR,
+            interpolation=TF.InterpolationMode.BILINEAR,
         )
     )
     height = center_crop(
         height,
         size=(256, 256),
         resize_to=[1024, 1024],
-        interpolation=T.InterpolationMode.BICUBIC,
+        interpolation=TF.InterpolationMode.BICUBIC,
     )
     metallic = center_crop(
         metallic,
         size=(256, 256),
         resize_to=[1024, 1024],
-        interpolation=T.InterpolationMode.BILINEAR,
+        interpolation=TF.InterpolationMode.BILINEAR,
     )
     roughness = center_crop(
         roughness,
         size=(256, 256),
         resize_to=[1024, 1024],
-        interpolation=T.InterpolationMode.BILINEAR,
+        interpolation=TF.InterpolationMode.BILINEAR,
     )
     ao = center_crop(
         ao,
         size=(256, 256),
         resize_to=[1024, 1024],
-        interpolation=T.InterpolationMode.BILINEAR,
+        interpolation=TF.InterpolationMode.BILINEAR,
     )
 
-    original_normal = transform_validation_gt(normal)
-    original_diffuse = transform_validation_gt(diffuse)
+    original_normal = TF.to_tensor(normal)
+    original_diffuse = TF.to_tensor(diffuse)
 
-    diffuse = transform_validation_input(diffuse)
-    normal = transform_validation_input(normal)
-    diffuse_and_normal = torch.cat((diffuse, normal), dim=0)  # type: ignore
+    diffuse = TF.to_tensor(diffuse)
+    diffuse = TF.normalize(
+        diffuse, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
+    )
 
-    albedo = transform_validation_gt(albedo)
+    normal = TF.to_tensor(normal)
+    normal = TF.normalize(
+        normal, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
+    )
+    diffuse_and_normal = torch.cat((diffuse, normal), dim=0)
+
+    albedo = TF.to_tensor(albedo)
 
     height_arr = np.array(height, dtype=np.uint16)
     height_arr = height_arr.astype(np.float32) / 65535.0  # Normalize to [0, 1]
     height = torch.from_numpy(height_arr).unsqueeze(0)
 
-    metallic = transform_validation_gt(metallic)
-
-    roughness = transform_validation_gt(roughness)
-
-    ao = transform_validation_gt(ao)
+    metallic = TF.to_tensor(metallic)
+    roughness = TF.to_tensor(roughness)
+    ao = TF.to_tensor(ao)
 
     return {
         "diffuse_and_normal": diffuse_and_normal,
@@ -402,6 +345,8 @@ def calculate_unet_albedo_loss(
         ecpoch_data["unet_albedo"][key] = {
             "l1_loss": 0.0,
             "total_loss": 0.0,
+            "ssim_loss": 0.0,
+            "lpips": 0.0,
             # "per_class_loss": {name: 0.0 for name in CLASS_LIST},
             # "per_class_sample_count": {name: 0 for name in CLASS_LIST},
         }
@@ -418,20 +363,20 @@ def calculate_unet_albedo_loss(
     ecpoch_data["unet_albedo"][key]["l1_loss"] += l1_loss.item()
 
     # SSIM
-    # ssim_val = FM.structural_similarity_index_measure(
-    #     albedo_pred.clamp(0, 1), albedo_gt.clamp(0, 1), data_range=1.0
-    # )
-    # if isinstance(ssim_val, tuple):
-    #     ssim_val = ssim_val[0]
-    # ssim_loss = 1 - ssim_val.item()
+    ssim_val = FM.structural_similarity_index_measure(
+        albedo_pred.clamp(0, 1), albedo_gt.clamp(0, 1), data_range=1.0
+    )
+    if isinstance(ssim_val, tuple):
+        ssim_val = ssim_val[0]
+    ssim_loss = 1 - ssim_val
+    ecpoch_data["unet_albedo"][key]["ssim_loss"] += ssim_loss.item()
 
     # # LPIPS
-    # lpips = lpips_batch(
-    #     albedo_pred.clamp(0, 1), albedo_gt.clamp(0, 1)
-    # )
+    lpips = lpips_batch(albedo_pred.clamp(0, 1), albedo_gt.clamp(0, 1))
+    ecpoch_data["unet_albedo"][key]["lpips"] += lpips.item()
 
     # Total loss
-    total_loss = l1_loss
+    total_loss = l1_loss + 0.1 * ssim_loss + 0.05 * lpips
 
     ecpoch_data["unet_albedo"][key]["total_loss"] += total_loss.item()
 
@@ -457,14 +402,15 @@ def calculate_unet_maps_loss(
 
     if ecpoch_data["unet_maps"].get(key) is None:
         ecpoch_data["unet_maps"][key] = {
-            "total_loss": 0.0,
-            "rough_loss": 0.0,
             "rough_l1_loss": 0.0,
+            "rought_ssim_loss": 0.0,
+            "rough_loss": 0.0,
             "metal_loss": 0.0,
             "ao_loss": 0.0,
-            "height_loss": 0.0,
             "height_l1_loss": 0.0,
-            "height_tv": 0.0,
+            "height_tv_penalty": 0.0,
+            "height_loss": 0.0,
+            "total_loss": 0.0,
         }
 
     # Calculate masks
@@ -476,28 +422,28 @@ def calculate_unet_maps_loss(
         pred=roughness_pred, target=roughness_gt, material_mask=mask_all
     )
     ecpoch_data["unet_maps"][key]["rough_l1_loss"] += l1_rough.item()
-    # ssim_rough = FM.structural_similarity_index_measure(
-    #     roughness_pred.clamp(0, 1),
-    #     roughness_gt.clamp(0, 1),
-    #     data_range=1.0,
-    # )
-    # if isinstance(ssim_rough, tuple):
-    #     ssim_rough = ssim_rough[0]
+    ssim_rough = FM.structural_similarity_index_measure(
+        roughness_pred.clamp(0, 1),
+        roughness_gt.clamp(0, 1),
+        data_range=1.0,
+    )
+    if isinstance(ssim_rough, tuple):
+        ssim_rough = ssim_rough[0]
 
-    # loss_rough = l1_rough + 0.05 * (1 - ssim_rough)
-    loss_rough = l1_rough
+    ssim_rough_loss = 1 - ssim_rough
+    ecpoch_data["unet_maps"][key]["rought_ssim_loss"] += ssim_rough_loss.item()
+
+    loss_rough = l1_rough + 0.05 * ssim_rough_loss
     ecpoch_data["unet_maps"][key]["rough_loss"] += loss_rough.item()
 
     # Metal
-    # loss_metal = F.binary_cross_entropy_with_logits(
-    #     metallic_pred,
-    #     metallic_gt,
-    #     weight=mask_metal,  # Zeros out non-metal regions
-    #     reduction="sum",
-    # )
-    # loss_metal = loss_metal / mask_metal.sum().clamp(min=1.0)  # Avoid division by zero
-    # Phase A0
-    loss_metal = masked_l1(metallic_pred, metallic_gt, material_mask=mask_all)
+    loss_metal = F.binary_cross_entropy_with_logits(
+        metallic_pred,
+        metallic_gt,
+        weight=mask_metal,  # Zeros out non-metal regions
+        reduction="sum",
+    )
+    loss_metal = loss_metal / mask_metal.sum().clamp(min=1.0)  # Avoid division by zero
     ecpoch_data["unet_maps"][key]["metal_loss"] += loss_metal.item()
 
     # AO, since every pixel is important, we use a mask of ones
@@ -505,15 +451,18 @@ def calculate_unet_maps_loss(
     ecpoch_data["unet_maps"][key]["ao_loss"] += loss_ao.item()
 
     # Height
-    loss_height = masked_l1(height_pred, height_gt, mask_all)
-    ecpoch_data["unet_maps"][key]["height_l1_loss"] += loss_height.item()
+    l1_height = masked_l1(height_pred, height_gt, mask_all)
+    ecpoch_data["unet_maps"][key]["height_l1_loss"] += l1_height.item()
     # Gradient total variation (TV) smoothness penalty
     # [w0 - w1, w1 - w2, ..., wN-1 - wN]
-    # dx = torch.abs(height_pred[..., :-1] - height_pred[..., 1:]).mean()
+    dx = torch.abs(height_pred[..., :-1] - height_pred[..., 1:]).mean()
     # [h0 - h1, h1 - h2, ..., hN-1 - hN]
-    # dy = torch.abs(height_pred[..., :-1, :] - height_pred[..., 1:, :]).mean()
-    # tv = dx + dy
-    # loss_height = masked_l1(height_pred, height_gt, mask_all) + 0.01 * tv
+    dy = torch.abs(height_pred[..., :-1, :] - height_pred[..., 1:, :]).mean()
+    tv = dx + dy
+    grad_penalty = 0.01 * tv
+    ecpoch_data["unet_maps"][key]["height_tv_penalty"] += grad_penalty.item()
+
+    loss_height = l1_height + grad_penalty
     # Since every pixel is important, we use a mask of ones
     ecpoch_data["unet_maps"][key]["height_loss"] += loss_height.item()
 
@@ -529,12 +478,22 @@ def calculate_avg(epoch_data, key="train"):
     epoch_data["unet_albedo"][key]["l1_loss"] = (
         epoch_data["unet_albedo"][key]["l1_loss"] / total_batches
     )
+    epoch_data["unet_albedo"][key]["ssim_loss"] = (
+        epoch_data["unet_albedo"][key]["ssim_loss"] / total_batches
+    )
+    epoch_data["unet_albedo"][key]["lpips"] = (
+        epoch_data["unet_albedo"][key]["lpips"] / total_batches
+    )
+
     epoch_data["unet_albedo"][key]["total_loss"] = (
         epoch_data["unet_albedo"][key]["total_loss"] / total_batches
     )
 
     epoch_data["unet_maps"][key]["rough_l1_loss"] = (
         epoch_data["unet_maps"][key]["rough_l1_loss"] / total_batches
+    )
+    epoch_data["unet_maps"][key]["rought_ssim_loss"] = (
+        epoch_data["unet_maps"][key]["rought_ssim_loss"] / total_batches
     )
     epoch_data["unet_maps"][key]["rough_loss"] = (
         epoch_data["unet_maps"][key]["rough_loss"] / total_batches
@@ -547,6 +506,9 @@ def calculate_avg(epoch_data, key="train"):
     )
     epoch_data["unet_maps"][key]["height_l1_loss"] = (
         epoch_data["unet_maps"][key]["height_l1_loss"] / total_batches
+    )
+    epoch_data["unet_maps"][key]["height_tv_penalty"] = (
+        epoch_data["unet_maps"][key]["height_tv_penalty"] / total_batches
     )
     epoch_data["unet_maps"][key]["height_loss"] = (
         epoch_data["unet_maps"][key]["height_loss"] / total_batches
@@ -566,10 +528,6 @@ def to_rgb(x):
     return x.repeat(3, 1, 1)
 
 
-train_dataset.set_transform(transform_train_fn)
-validation_dataset.set_transform(transform_val_fn)
-
-
 # Training loop
 def do_train():
     print(
@@ -577,15 +535,15 @@ def do_train():
     )
 
     train_loader = DataLoader(
-        train_dataset,  # type: ignore
+        train_dataset,
         batch_size=BATCH_SIZE,
-        # sampler=train_sampler,
+        sampler=train_sampler,
         # num_workers=4,
-        shuffle=True,  # ! DISABLE FOR PHASE A+
+        shuffle=False,
     )
 
     validation_loader = DataLoader(
-        validation_dataset,  # type: ignore
+        validation_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,  # No need to shuffle validation data
         # num_workers=6,
@@ -596,12 +554,33 @@ def do_train():
         lr=LR,
         weight_decay=WD,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_MAX)
+    if checkpoint is not None and resume_training:
+        print("Loading optimizer state from checkpoint.")
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_MAX)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=LR,
+        total_steps=EPOCHS * len(train_loader),
+        # 15% warm-up 85% cooldown
+        pct_start=0.15,
+        div_factor=5.0,  # start LR = 1e-5
+        final_div_factor=5.0,  # End LR = 1e-5
+    )
+    if checkpoint is not None and resume_training:
+        print("Loading scheduler state from checkpoint.")
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
     scaler = GradScaler(device.type)  # AMP scaler for mixed precision
+    if checkpoint is not None and resume_training:
+        print("Loading scaler state from checkpoint.")
+        scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
     best_val_loss_albedo = float("inf")
     best_val_loss_maps = float("inf")
-    patience = 4
+    patience = 6
+    patience_min_delta = 0.005
     no_improvement_count_albedo = 0
     no_improvement_count_maps = 0
     albedo_frozen = False
@@ -610,13 +589,29 @@ def do_train():
     output_dir = Path(f"./weights/{PHASE}/unets")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for epoch in range(EPOCHS):
+    start_epoch = 0
+    if checkpoint is not None and resume_training:
+        start_epoch = checkpoint["epoch"]
+        print(f"Resuming training from epoch {start_epoch}.")
+
+    for epoch in range(start_epoch, EPOCHS):
         if albedo_frozen and maps_frozen:
             print("Both UNet-Albedo and UNet-Maps are auto frozen, stopping training.")
             break
 
         unet_alb.train()
         unet_maps.train()
+
+        train_dataset.set_transform(
+            get_transform_train(
+                epoch + 1,
+                # flips are enabled from epoch 1
+                safe_augmentations=True,
+                # Color augmentations are enabled after warm-up (from epoch 6)
+                color_augmentations=(epoch + 1) > 5,
+            )
+        )
+        validation_dataset.set_transform(transform_val_fn)
 
         # Should we use GT albedo for UNet-maps
         teacher_epochs = 10 if PHASE.lower() == "a" or PHASE.lower() == "a0" else 0
@@ -892,7 +887,24 @@ def do_train():
 
         print(json.dumps(epoch_data, indent=4))
 
-        if unet_albedo_total_val_loss < best_val_loss_albedo:
+        # Save checkopoint after each epoch
+        torch.save(
+            {
+                "epoch": epoch + 1,
+                "unet_albedo_model_state_dict": unet_alb.state_dict(),
+                "unet_maps_model_state_dict": unet_maps.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
+                "epoch_data": epoch_data,
+            },
+            output_dir / f"checkpoint_epoch_{epoch + 1}.pt",
+        )
+        # Save epoch data to a JSON file
+        with open(output_dir / f"epoch_{epoch + 1}_stats.json", "w") as f:
+            json.dump(epoch_data, f, indent=4)
+
+        if unet_albedo_total_val_loss < best_val_loss_albedo - patience_min_delta:
             best_val_loss_albedo = unet_albedo_total_val_loss
             no_improvement_count_albedo = 0
         else:
@@ -911,7 +923,7 @@ def do_train():
 
                 albedo_frozen = True
 
-        if unet_maps_total_val_loss < best_val_loss_maps:
+        if unet_maps_total_val_loss < best_val_loss_maps - patience_min_delta:
             best_val_loss_maps = unet_maps_total_val_loss
             no_improvement_count_maps = 0
         else:
@@ -929,22 +941,6 @@ def do_train():
                     p.grad = None  # Clear stale gradients
 
                 maps_frozen = True
-
-        # Save checkopoint after each epoch
-        torch.save(
-            {
-                "epoch": epoch + 1,
-                "unet_albedo_model_state_dict": unet_alb.state_dict(),
-                "unet_maps_model_state_dict": unet_maps.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "epoch_data": epoch_data,
-            },
-            output_dir / f"checkpoint_epoch_{epoch + 1}.pt",
-        )
-        # Save epoch data to a JSON file
-        with open(output_dir / f"epoch_{epoch + 1}_stats.json", "w") as f:
-            json.dump(epoch_data, f, indent=4)
 
         scheduler.step()
 
