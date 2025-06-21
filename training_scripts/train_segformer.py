@@ -152,6 +152,7 @@ if (args.load_checkpoint is not None) and Path(args.load_checkpoint).resolve().e
     best_model_checkpoint = torch.load(load_checkpoint_path, map_location=device)
 
 if best_model_checkpoint is not None:
+    print("Loading model state from checkpoint.")
     model.load_state_dict(
         best_model_checkpoint["model_state_dict"],
     )
@@ -368,7 +369,8 @@ def do_train():
         scaler.load_state_dict(best_model_checkpoint["scaler_state_dict"])
 
     best_val_loss = float("inf")
-    patience = 4
+    patience = 6
+    patience_min_delta = 0.005
     no_improvement_count = 0
 
     output_dir = Path(f"./weights/{PHASE}/segformer")
@@ -549,7 +551,7 @@ def do_train():
         with open(output_dir / f"epoch_{epoch + 1}_stats.json", "w") as f:
             json.dump(epoch_data, f, indent=4)
 
-        if val_loss_avg < best_val_loss:
+        if val_loss_avg < best_val_loss - patience_min_delta:
             best_val_loss = val_loss_avg
             no_improvement_count = 0
 
