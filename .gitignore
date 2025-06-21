@@ -3,3 +3,4 @@ weights
 matsynth_processed
 matsynth_category_samples
 __pycache__
+segformer_sample_test

@@ -173,9 +173,7 @@ with torch.no_grad():
         total=len(validation_loader),
     ):
         input = batch["pixel_values"]
-        labels_gt = batch["labels"]
         input = input.to(device, non_blocking=True)
-        labels_gt = labels_gt.to(device, non_blocking=True)
         albedo = batch["albedo"]
         name = batch["name"]
         category = batch["category"]
