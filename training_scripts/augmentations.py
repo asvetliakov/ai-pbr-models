@@ -14,6 +14,17 @@ from train_dataset import normalize_normal_map
 # import cv2
 
 
+def center_crop(
+    image: Image.Image,
+    size: tuple[int, int],
+    resize_to: list[int],
+    interpolation: TF.InterpolationMode,
+) -> Image.Image:
+    crop = TF.center_crop(image, size)  # type: ignore
+    resized = TF.resize(crop, resize_to, interpolation=interpolation)  # type: ignore
+    return resized  # type: ignore
+
+
 def get_random_crop(
     albedo: Image.Image,
     normal: Image.Image,

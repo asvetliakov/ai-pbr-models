@@ -24,7 +24,12 @@ from transformers.utils.constants import (
     IMAGENET_STANDARD_STD,
 )
 from train_dataset import SimpleImageDataset, normalize_normal_map
-from augmentations import get_random_crop, make_full_image_mask, selective_aug
+from augmentations import (
+    get_random_crop,
+    make_full_image_mask,
+    selective_aug,
+    center_crop,
+)
 
 parser = argparse.ArgumentParser(
     description="Train Segformer for Semantic Segmentation"
@@ -156,17 +161,6 @@ if best_model_checkpoint is not None:
     model.load_state_dict(
         best_model_checkpoint["model_state_dict"],
     )
-
-
-def center_crop(
-    image: Image.Image,
-    size: tuple[int, int],
-    resize_to: list[int],
-    interpolation: TF.InterpolationMode,
-) -> Image.Image:
-    crop = TF.center_crop(image, size)  # type: ignore
-    resized = TF.resize(crop, resize_to, interpolation=interpolation)  # type: ignore
-    return resized  # type: ignore
 
 
 def get_transform_train(
