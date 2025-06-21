@@ -71,7 +71,7 @@ class SimpleImageDataset(Dataset):
             1: (216, 27, 96),  # fabric, Raspberry
             2: (139, 195, 74),  # ground, Olive Green
             3: (141, 110, 99),  # leather, Saddle Brown
-            4: (96, 125, 139),  # metal, Steel Blue
+            4: (0, 145, 233),  # metal, Blue
             5: (120, 144, 156),  # stone, Slate Gray
             6: (229, 115, 115),  # wood, Burnt Sienna
         }
