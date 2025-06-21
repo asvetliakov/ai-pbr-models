@@ -9,6 +9,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from PIL import Image
 from tqdm import tqdm
+import argparse
 
 # from torchvision.utils import save_image
 from torchvision.transforms import functional as TF
@@ -25,6 +26,33 @@ from transformers.utils.constants import (
 from train_dataset import SimpleImageDataset, normalize_normal_map
 from augmentations import get_random_crop, make_full_image_mask, selective_aug
 
+parser = argparse.ArgumentParser(
+    description="Train Segformer for Semantic Segmentation"
+)
+parser.add_argument(
+    "--phase",
+    type=str,
+    default="a",
+    help="Phase of the training per plan, used for logging and saving",
+)
+parser.add_argument(
+    "--load_checkpoint",
+    type=str,
+    default=None,
+    help="Path to the checkpoint to load the model from",
+)
+
+parser.add_argument(
+    "--resume",
+    type=bool,
+    default=False,
+    help="Whether to resume training from the last checkpoint",
+)
+
+args = parser.parse_args()
+
+print(f"Training phase: {args.phase}")
+
 BASE_DIR = Path(__file__).resolve().parent
 
 from torch.amp.grad_scaler import GradScaler
@@ -36,7 +64,8 @@ EPOCHS = 35  # Number of epochs to train
 LR = 5e-5  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
-PHASE = "a"  # Phase of the training per plan, used for logging and saving
+# PHASE = "a"  # Phase of the training per plan, used for logging and saving
+PHASE = args.phase  # Phase of the training per plan, used for logging and saving
 
 # Enable TF32 for faster training on Ampere GPUs
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -76,12 +105,6 @@ train_sampler = WeightedRandomSampler(
 )
 
 
-# Load checkpoint from phase a0
-best_model_checkpoint_path = (
-    BASE_DIR / f"../weights/a0/segformer/best_model.pt"
-).resolve()
-best_model_checkpoint = torch.load(best_model_checkpoint_path, map_location=device)
-
 model = SegformerForSemanticSegmentation.from_pretrained(
     "nvidia/segformer-b2-finetuned-ade-512-512",
     num_labels=len(train_dataset.CLASS_LIST),  # Number of classes for segmentation
@@ -120,9 +143,18 @@ model.segformer.encoder.patch_embeddings[0].proj = new_conv
 # 6) Update config so future code knows to expect 6 channels
 model.config.num_channels = 6
 
-model.load_state_dict(
-    best_model_checkpoint["model_state_dict"],
-)
+resume_training = args.resume
+if (args.load_checkpoint is not None) and Path(args.load_checkpoint).resolve().exists():
+    load_checkpoint_path = Path(args.load_checkpoint).resolve()
+    print(
+        f"Loading model from checkpoint: {load_checkpoint_path}, resume={resume_training}"
+    )
+    best_model_checkpoint = torch.load(load_checkpoint_path, map_location=device)
+
+if best_model_checkpoint is not None:
+    model.load_state_dict(
+        best_model_checkpoint["model_state_dict"],
+    )
 
 
 def center_crop(
@@ -312,6 +344,10 @@ def do_train():
     )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WD)
+    if best_model_checkpoint is not None and resume_training:
+        print("Loading optimizer state from checkpoint.")
+        optimizer.load_state_dict(best_model_checkpoint["optimizer_state_dict"])
+
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_MAX)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
@@ -322,7 +358,14 @@ def do_train():
         div_factor=5.0,  # start LR = 1e-5
         final_div_factor=5.0,  # End LR = 1e-5
     )
+    if best_model_checkpoint is not None and resume_training:
+        print("Loading scheduler state from checkpoint.")
+        scheduler.load_state_dict(best_model_checkpoint["scheduler_state_dict"])
+
     scaler = GradScaler(device.type)  # AMP scaler for mixed precision
+    if best_model_checkpoint is not None and resume_training:
+        print("Loading scaler state from checkpoint.")
+        scaler.load_state_dict(best_model_checkpoint["scaler_state_dict"])
 
     best_val_loss = float("inf")
     patience = 4
@@ -331,7 +374,12 @@ def do_train():
     output_dir = Path(f"./weights/{PHASE}/segformer")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for epoch in range(EPOCHS):
+    start_epoch = 0
+    if best_model_checkpoint is not None and resume_training:
+        print(f"Resuming training from epoch {start_epoch}.")
+        start_epoch = best_model_checkpoint["epoch"]
+
+    for epoch in range(start_epoch, EPOCHS):
         model.train()
 
         train_dataset.set_transform(
@@ -485,6 +533,22 @@ def do_train():
 
         print(json.dumps(epoch_data, indent=4))
 
+        # Save checkopoint after each epoch
+        torch.save(
+            {
+                "epoch": epoch + 1,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
+                "epoch_data": epoch_data,
+            },
+            output_dir / f"checkpoint_epoch_{epoch + 1}.pt",
+        )
+        # Save epoch data to a JSON file
+        with open(output_dir / f"epoch_{epoch + 1}_stats.json", "w") as f:
+            json.dump(epoch_data, f, indent=4)
+
         if val_loss_avg < best_val_loss:
             best_val_loss = val_loss_avg
             no_improvement_count = 0
@@ -495,6 +559,7 @@ def do_train():
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
+                    "scaler_state_dict": scaler.state_dict(),
                     "epoch_data": epoch_data,
                 },
                 output_dir / "best_model.pt",
@@ -517,21 +582,6 @@ def do_train():
                     f"Early stopping at epoch {epoch + 1}, no improvement for {patience} epochs."
                 )
                 break
-
-        # Save checkopoint after each epoch
-        torch.save(
-            {
-                "epoch": epoch + 1,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "epoch_data": epoch_data,
-            },
-            output_dir / f"checkpoint_epoch_{epoch + 1}.pt",
-        )
-        # Save epoch data to a JSON file
-        with open(output_dir / f"epoch_{epoch + 1}_stats.json", "w") as f:
-            json.dump(epoch_data, f, indent=4)
 
         scheduler.step()
 
