@@ -299,7 +299,7 @@ def transform_val_fn(example):
     }
 
 
-def masked_l1(pred, target, material_mask, w_fg=3.0, w_bg=1.0):
+def masked_l1(pred, target, material_mask, w_fg=1.0, w_bg=1.0):
     """
     Loss re‑weighting
     Give pixels whose material matches the ground‑truth map name a higher weight (so the “metal” area influences metallic map loss more, etc.):
@@ -352,13 +352,14 @@ def calculate_unet_albedo_loss(
         }
 
     # L1 Loss
-    l1_loss = masked_l1(
-        albedo_pred,
-        albedo_gt,
-        material_mask=torch.ones_like(
-            albedo_pred[:, :1], dtype=torch.bool, device=device
-        ),
-    )
+    # l1_loss = masked_l1(
+    #     albedo_pred,
+    #     albedo_gt,
+    #     material_mask=torch.ones_like(
+    #         albedo_pred[:, :1], dtype=torch.bool, device=device
+    #     ),
+    # )
+    l1_loss = F.l1_loss(albedo_pred, albedo_gt)
 
     ecpoch_data["unet_albedo"][key]["l1_loss"] += l1_loss.item()
 
@@ -414,13 +415,15 @@ def calculate_unet_maps_loss(
         }
 
     # Calculate masks
-    mask_all = torch.ones_like(roughness_gt, dtype=torch.bool)  # (B, 1, H, W)
+    # mask_all = torch.ones_like(roughness_gt, dtype=torch.bool)  # (B, 1, H, W)
     mask_metal = (masks == train_dataset.METAL_IDX).unsqueeze(1)  # (B, 1, H, W)
 
     # Roughness, since every pixel is important, we use a mask of ones
-    l1_rough = masked_l1(
-        pred=roughness_pred, target=roughness_gt, material_mask=mask_all
-    )
+    # l1_rough = masked_l1(
+    #     pred=roughness_pred, target=roughness_gt, material_mask=mask_all
+    # )
+    l1_rough = F.l1_loss(roughness_pred, roughness_gt)
+
     ecpoch_data["unet_maps"][key]["rough_l1_loss"] += l1_rough.item()
     ssim_rough = FM.structural_similarity_index_measure(
         roughness_pred.clamp(0, 1),
@@ -447,11 +450,13 @@ def calculate_unet_maps_loss(
     ecpoch_data["unet_maps"][key]["metal_loss"] += loss_metal.item()
 
     # AO, since every pixel is important, we use a mask of ones
-    loss_ao = masked_l1(ao_pred, ao_gt, material_mask=mask_all)
+    # loss_ao = masked_l1(ao_pred, ao_gt, material_mask=mask_all)
+    loss_ao = F.l1_loss(ao_pred, ao_gt)
     ecpoch_data["unet_maps"][key]["ao_loss"] += loss_ao.item()
 
     # Height
-    l1_height = masked_l1(height_pred, height_gt, mask_all)
+    # l1_height = masked_l1(height_pred, height_gt, mask_all)
+    l1_height = F.l1_loss(height_pred, height_gt)
     ecpoch_data["unet_maps"][key]["height_l1_loss"] += l1_height.item()
     # Gradient total variation (TV) smoothness penalty
     # [w0 - w1, w1 - w2, ..., wN-1 - wN]
@@ -727,6 +732,7 @@ def do_train():
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
+                scheduler.step()
 
         unet_alb.eval()
         unet_maps.eval()
@@ -941,8 +947,6 @@ def do_train():
                     p.grad = None  # Clear stale gradients
 
                 maps_frozen = True
-
-        scheduler.step()
 
     print("Training completed.")
 

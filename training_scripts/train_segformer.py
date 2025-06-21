@@ -442,6 +442,7 @@ def do_train():
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            scheduler.step()
 
         train_loss_avg = train_loss_sum / train_batch_count
         epoch_data["train_loss"] = train_loss_avg
@@ -578,8 +579,6 @@ def do_train():
                     f"Early stopping at epoch {epoch + 1}, no improvement for {patience} epochs."
                 )
                 break
-
-        scheduler.step()
 
     print("Training completed.")
 
