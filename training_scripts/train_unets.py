@@ -428,9 +428,9 @@ def calculate_unet_maps_loss(
 
     # Calculate masks
     # mask_all = torch.ones_like(roughness_gt, dtype=torch.bool)  # (B, 1, H, W)
-    mask_metal = (
-        (masks == train_dataset.METAL_IDX).unsqueeze(1).to(device)
-    )  # (B, 1, H, W)
+    # mask_metal = (
+    #     (masks == train_dataset.METAL_IDX).unsqueeze(1).to(device)
+    # )  # (B, 1, H, W)
 
     # Roughness, since every pixel is important, we use a mask of ones
     # l1_rough = masked_l1(
@@ -455,15 +455,22 @@ def calculate_unet_maps_loss(
     ecpoch_data["unet_maps"][key]["rough_loss"] += loss_rough.item()
 
     # Metal
+    pos_pixels = metallic_gt.sum()
+    neg_pixels = metallic_gt.numel() - pos_pixels
+    pos_weight = neg_pixels.float() / (pos_pixels.float().clamp(min=1.0))
     loss_metal = F.binary_cross_entropy_with_logits(
-        metallic_pred,
-        metallic_gt,
-        weight=mask_metal,  # Zeros out non-metal regions
-        reduction="sum",
-    )
-    loss_metal = (
-        loss_metal / mask_metal.sum().clamp(min=1.0)  # Avoid division by zero
+        metallic_pred, metallic_gt, pos_weight=pos_weight
     ).float()
+
+    # loss_metal = F.binary_cross_entropy_with_logits(
+    #     metallic_pred,
+    #     metallic_gt,
+    #     weight=mask_metal,  # Zeros out non-metal regions
+    #     reduction="sum",
+    # )
+    # loss_metal = (
+    #     loss_metal / mask_metal.sum().clamp(min=1.0)  # Avoid division by zero
+    # ).float()
     ecpoch_data["unet_maps"][key]["metal_loss"] += loss_metal.item()
 
     # AO, since every pixel is important, we use a mask of ones

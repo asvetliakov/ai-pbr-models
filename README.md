@@ -66,12 +66,12 @@ Below, each phase is _self‑contained_.
 
 ### Unet-maps loss table
 
-| Map           | Range        | Loss terms                                                   |
-| ------------- | ------------ | ------------------------------------------------------------ |
-| **Roughness** | 0-1          | `masked_L1` + **0.05 × SSIM**                                |
-| **Metallic**  | 0-1          | `masked_BCE` (sigmoid logits) _only inside metal mask_       |
-| **AO**        | 0-1          | `masked_L1`                                                  |
-| **Height**    | unrestricted | `masked_L1` + **0.01 × Grad-penalty** (encourage smoothness) |
+| Map           | Range        | Loss terms                                                                          |
+| ------------- | ------------ | ----------------------------------------------------------------------------------- |
+| **Roughness** | 0-1          | `masked_L1` + **0.05 × SSIM**                                                       |
+| **Metallic**  | 0-1          | Full-image BCE (From Metallic mask GT) + pos_weight = #neg / #pos. No explicit mask |
+| **AO**        | 0-1          | `masked_L1`                                                                         |
+| **Height**    | unrestricted | `masked_L1` + **0.01 × Grad-penalty** (encourage smoothness)                        |
 
 _Validation loss fro UNet-maps_
 Same losses but WITHOUT gradient penalty (TV) to save time
@@ -82,6 +82,13 @@ _Masked L1 examles:_
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
 | **UNet-Albedo**                          | All _valid_ pixels (because the whole albedo image is relevant) → just pass `material_mask = torch.ones_like(pred[:, :1])`. Effectively your `masked_l1` simplifies to plain L1 but keeps the same call-signature. | Phases A → D                                                  |
 | **UNet-Maps** (rough, metal, AO, height) | Pixels **belonging to the map’s material**. Example for metallic head:<br>`material_mask = (segformer_pred == metal_idx)` (upsampled to H×W).                                                                      | Phases B → D (when SegFormer is good enough to provide masks) |
+
+_Metal mask_ per phases
+| phase | supervision available | suggested loss |
+| --------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **A** (MatSynth 100 %) | _perfect_ GT metallic maps | **Full-image BCE** + `pos_weight = #neg / #pos`. No explicit mask. |
+| **B / C** (MatSynth + Skyrim, masks from SegFormer) | SegFormer masks have some error | Two equally good options: <br>**(i)** Keep full-image BCE + `pos_weight`. The BCEloss is hardy to a few wrong pixels.<br>**(ii)** Go back to masked BCE but use a small background weight, e.g. `weight = 0.2 + 0.8*mask_metal` so negatives still matter a bit. |
+| **D** (2 K, masks fixed) | SegFormer very stable | Either strategy works – most people stay with whatever they used in C. |
 
 ```python
 # Albedo
@@ -110,8 +117,17 @@ loss_rough = masked_l1(pred_rough, gt_rough, rough_mask) \
            + 0.05 * (1 - ssim(pred_rough, gt_rough))
 
 # Metallic (only evaluate where material truly metal)
-loss_metal = F.binary_cross_entropy(pred_metal, gt_metal,
-                                    weight = metal_mask.float())
+# loss_metal = F.binary_cross_entropy(pred_metal, gt_metal,
+#                                     weight = metal_mask.float())
+# count positive / negative pixels in this mini-batch
+pos = metallic_gt.sum()
+neg = metallic_gt.numel() - pos
+pos_weight = neg.float() / pos.clamp(min=1.)   # scalar
+
+loss_metal = F.binary_cross_entropy_with_logits(
+                 metallic_pred, metallic_gt,
+                 pos_weight = pos_weight)   # reduction='mean'
+
 
 # AO
 loss_ao = masked_l1(pred_ao, gt_ao, torch.ones_like(gt_ao))
