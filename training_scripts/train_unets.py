@@ -152,7 +152,7 @@ def get_transform_train(
             augmentations=safe_augmentations,
         )
 
-        albedo_orig = albedo.copy()
+        albedo_orig = albedo
         albedo_aug = albedo
 
         if color_augmentations:
@@ -379,7 +379,7 @@ def calculate_unet_albedo_loss(
     ssim_loss = 1 - ssim_val
     ecpoch_data["unet_albedo"][key]["ssim_loss"] += ssim_loss.item()
 
-    # # LPIPS
+    # LPIPS
     lpips = lpips_batch(albedo_pred.clamp(0, 1), albedo_gt.clamp(0, 1))
     ecpoch_data["unet_albedo"][key]["lpips"] += lpips.item()
 
@@ -676,6 +676,11 @@ def do_train():
                 # Get UNet-Albedo prediction
                 albedo_pred = unet_alb(diffuse_and_normal, None)
 
+            # Unet-albedo loss
+            unet_albedo_loss = calculate_unet_albedo_loss(
+                albedo_pred, albedo_gt, category, epoch_data, key="train"
+            )
+
             # Get albedo input for UNet-maps
             if epoch < teacher_epochs:
                 # predirected albedo is not good enough in earlier phases on early epochs so use GT albedo (potentially augmented)
@@ -706,11 +711,6 @@ def do_train():
             metallic_pred = maps_pred["metal"]
             ao_pred = maps_pred["ao"]
             height_pred = maps_pred["height"]
-
-            # Unet-albedo loss
-            unet_albedo_loss = calculate_unet_albedo_loss(
-                albedo_pred, albedo_gt, category, epoch_data, key="train"
-            )
 
             unet_maps_loss = calculate_unet_maps_loss(
                 roughness_pred,
@@ -781,6 +781,10 @@ def do_train():
                     #     .hidden_states[-1].detach()      # (B,256,H/16,W/16)
                     albedo_pred = unet_alb(diffuse_and_normal, None)
 
+                calculate_unet_albedo_loss(
+                    albedo_pred, albedo_gt, category, epoch_data, key="validation"
+                )
+
                 # Normalize albedo_pred
                 unet_maps_input_albedo = TF.normalize(
                     albedo_pred,
@@ -801,10 +805,6 @@ def do_train():
                 metallic_pred = maps_pred["metal"]
                 ao_pred = maps_pred["ao"]
                 height_pred = maps_pred["height"]
-
-                calculate_unet_albedo_loss(
-                    albedo_pred, albedo_gt, category, epoch_data, key="validation"
-                )
 
                 calculate_unet_maps_loss(
                     roughness_pred,
