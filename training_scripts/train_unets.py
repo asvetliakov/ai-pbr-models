@@ -107,6 +107,7 @@ unet_maps = UNetMaps(
     device
 )  # type: ignore
 
+checkpoint = None
 resume_training = args.resume
 if (args.load_checkpoint is not None) and Path(args.load_checkpoint).resolve().exists():
     load_checkpoint_path = Path(args.load_checkpoint).resolve()
@@ -422,7 +423,9 @@ def calculate_unet_maps_loss(
 
     # Calculate masks
     # mask_all = torch.ones_like(roughness_gt, dtype=torch.bool)  # (B, 1, H, W)
-    mask_metal = (masks == train_dataset.METAL_IDX).unsqueeze(1)  # (B, 1, H, W)
+    mask_metal = (
+        (masks == train_dataset.METAL_IDX).unsqueeze(1).to(device)
+    )  # (B, 1, H, W)
 
     # Roughness, since every pixel is important, we use a mask of ones
     # l1_rough = masked_l1(
