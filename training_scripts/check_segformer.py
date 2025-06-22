@@ -41,6 +41,14 @@ parser.add_argument(
     help="Path to the checkpoint to load the model from",
 )
 
+parser.add_argument(
+    "--out_dir",
+    type=str,
+    default=None,
+    required=True,
+    help="Directory to save the output images",
+)
+
 matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
 
 device = torch.device("cuda")
@@ -95,7 +103,10 @@ model.segformer.encoder.patch_embeddings[0].proj = new_conv
 # 6) Update config so future code knows to expect 6 channels
 model.config.num_channels = 6
 
-checkpoint_path = Path(parser.parse_args().load_checkpoint).resolve()
+
+args = parser.parse_args()
+
+checkpoint_path = Path(args.load_checkpoint).resolve()
 print(f"Loading checkpoint from {checkpoint_path}")
 
 checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -163,7 +174,9 @@ def mask_to_pil(mask: torch.Tensor) -> Image.Image:
     return Image.fromarray(color_img)
 
 
-test_images = Path(BASE_DIR / "../segformer_sample_test").resolve()
+out_dir = Path(args.out_dir).resolve()
+
+test_images = Path(out_dir).resolve()
 test_images.mkdir(parents=True, exist_ok=True)
 
 with torch.no_grad():
