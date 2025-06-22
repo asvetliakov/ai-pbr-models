@@ -161,7 +161,6 @@ def get_transform_train(
             albedo_aug = selective_aug(albedo, category=category_name)
 
         mask = make_full_image_mask(category, img_size=(1024, 1024))
-        # Store normal for later visualization
 
         diffuse = TF.to_tensor(diffuse)  # type: ignore
         diffuse = TF.normalize(
@@ -219,7 +218,6 @@ def transform_val_fn(example):
 
     mask = make_full_image_mask(category, img_size=(1024, 1024))
 
-    # Store original non normalized diffuse and normal for visual inspection in validation loop
     albedo = center_crop(
         albedo,
         size=(256, 256),
@@ -266,6 +264,7 @@ def transform_val_fn(example):
         interpolation=TF.InterpolationMode.BILINEAR,
     )
 
+    # Store original non normalized diffuse and normal for visual inspection in validation loop
     original_normal = TF.to_tensor(normal)
     original_diffuse = TF.to_tensor(diffuse)
 
@@ -605,7 +604,6 @@ def do_train():
     best_val_loss_albedo = float("inf")
     best_val_loss_maps = float("inf")
     patience = 6
-    patience_min_delta = 0.005
     no_improvement_count_albedo = 0
     no_improvement_count_maps = 0
     albedo_frozen = False
@@ -942,7 +940,7 @@ def do_train():
         with open(output_dir / f"epoch_{epoch + 1}_stats.json", "w") as f:
             json.dump(epoch_data, f, indent=4)
 
-        if unet_albedo_total_val_loss < best_val_loss_albedo - patience_min_delta:
+        if unet_albedo_total_val_loss < best_val_loss_albedo * 0.99:
             best_val_loss_albedo = unet_albedo_total_val_loss
             no_improvement_count_albedo = 0
         else:
@@ -961,7 +959,7 @@ def do_train():
 
                 albedo_frozen = True
 
-        if unet_maps_total_val_loss < best_val_loss_maps - patience_min_delta:
+        if unet_maps_total_val_loss < best_val_loss_maps * 0.99:
             best_val_loss_maps = unet_maps_total_val_loss
             no_improvement_count_maps = 0
         else:
