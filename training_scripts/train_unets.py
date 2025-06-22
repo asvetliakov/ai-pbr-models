@@ -754,8 +754,7 @@ def do_train():
                 validation_loader, desc=f"Epoch {epoch + 1}/{EPOCHS} - Validation"
             ):
                 diffuse_and_normal = batch["diffuse_and_normal"]
-                albedo_gt = batch["albedo_orig"]
-                albedo_aug = batch["albedo_aug"]
+                albedo_gt = batch["albedo"]
                 normal = batch["normal"]
                 category = batch["category"]
                 height = batch["height"]
@@ -770,7 +769,6 @@ def do_train():
                 diffuse_and_normal = diffuse_and_normal.to(device, non_blocking=True)
                 normal = normal.to(device, non_blocking=True)
                 albedo_gt = albedo_gt.to(device, non_blocking=True)
-                albedo_aug = albedo_aug.to(device, non_blocking=True)
                 height = height.to(device, non_blocking=True)
                 metallic = metallic.to(device, non_blocking=True)
                 roughness = roughness.to(device, non_blocking=True)
