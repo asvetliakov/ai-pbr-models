@@ -455,12 +455,19 @@ def calculate_unet_maps_loss(
     ecpoch_data["unet_maps"][key]["rough_loss"] += loss_rough.item()
 
     # Metal
-    pos_pixels = metallic_gt.sum()
-    neg_pixels = metallic_gt.numel() - pos_pixels
-    pos_weight = neg_pixels.float() / (pos_pixels.float().clamp(min=1.0))
+    metal_positive = metallic_gt.sum().clamp(min=1.0)
+    metal_negative = (metallic_gt.numel() - metal_positive).clamp(min=1.0)
+    metal_ratio_raw = (metal_negative / metal_positive).sqrt().clamp(max=20.0)
+    metal_normaliser = (metal_ratio_raw * metal_positive + metal_negative) / (
+        metal_positive + metal_negative
+    )
+    metal_weight = metal_ratio_raw / metal_normaliser
+    non_metal_weight = 1.0 / metal_normaliser
+    weight_map = torch.where(metallic_gt > 0.5, metal_weight, non_metal_weight)
+
     loss_metal = F.binary_cross_entropy_with_logits(
-        metallic_pred, metallic_gt, pos_weight=pos_weight
-    ).float()
+        metallic_pred, metallic_gt, weight=weight_map, reduction="mean"
+    )
 
     # loss_metal = F.binary_cross_entropy_with_logits(
     #     metallic_pred,
