@@ -366,21 +366,27 @@ def calculate_unet_albedo_loss(
     #         albedo_pred[:, :1], dtype=torch.bool, device=device
     #     ),
     # )
-    l1_loss = F.l1_loss(albedo_pred, albedo_gt)
+    l1_loss = F.l1_loss(albedo_pred.clamp(0, 1), albedo_gt.clamp(0, 1))
+    l1_loss = l1_loss.float()
 
     ecpoch_data["unet_albedo"][key]["l1_loss"] += l1_loss.item()
 
     # SSIM
     ssim_val = FM.structural_similarity_index_measure(
-        albedo_pred.clamp(0, 1), albedo_gt.clamp(0, 1), data_range=1.0
+        albedo_pred.clamp(0, 1).float(), albedo_gt.clamp(0, 1).float(), data_range=1.0
     )
     if isinstance(ssim_val, tuple):
         ssim_val = ssim_val[0]
+    ssim_val = torch.nan_to_num(ssim_val, nan=1.0).float()
     ssim_loss = 1 - ssim_val
     ecpoch_data["unet_albedo"][key]["ssim_loss"] += ssim_loss.item()
 
     # LPIPS
-    lpips = lpips_batch(albedo_pred.clamp(0, 1), albedo_gt.clamp(0, 1))
+    with autocast(device_type=device.type, enabled=False):
+        lpips = lpips_batch(
+            albedo_pred.clamp(0, 1).float(), albedo_gt.clamp(0, 1).float()
+        )
+    lpips = torch.nan_to_num(lpips, nan=0.0).float()
     ecpoch_data["unet_albedo"][key]["lpips"] += lpips.item()
 
     # Total loss
@@ -431,18 +437,19 @@ def calculate_unet_maps_loss(
     # l1_rough = masked_l1(
     #     pred=roughness_pred, target=roughness_gt, material_mask=mask_all
     # )
-    l1_rough = F.l1_loss(roughness_pred, roughness_gt)
+    l1_rough = F.l1_loss(roughness_pred, roughness_gt).float()
 
     ecpoch_data["unet_maps"][key]["rough_l1_loss"] += l1_rough.item()
     ssim_rough = FM.structural_similarity_index_measure(
-        roughness_pred.clamp(0, 1),
-        roughness_gt.clamp(0, 1),
+        roughness_pred.clamp(0, 1).float(),
+        roughness_gt.clamp(0, 1).float(),
         data_range=1.0,
     )
     if isinstance(ssim_rough, tuple):
         ssim_rough = ssim_rough[0]
+    ssim_rough = torch.nan_to_num(ssim_rough, nan=1.0).float()
 
-    ssim_rough_loss = 1 - ssim_rough
+    ssim_rough_loss = (1 - ssim_rough).float()
     ecpoch_data["unet_maps"][key]["rought_ssim_loss"] += ssim_rough_loss.item()
 
     loss_rough = l1_rough + 0.05 * ssim_rough_loss
@@ -455,23 +462,25 @@ def calculate_unet_maps_loss(
         weight=mask_metal,  # Zeros out non-metal regions
         reduction="sum",
     )
-    loss_metal = loss_metal / mask_metal.sum().clamp(min=1.0)  # Avoid division by zero
+    loss_metal = (
+        loss_metal / mask_metal.sum().clamp(min=1.0)  # Avoid division by zero
+    ).float()
     ecpoch_data["unet_maps"][key]["metal_loss"] += loss_metal.item()
 
     # AO, since every pixel is important, we use a mask of ones
     # loss_ao = masked_l1(ao_pred, ao_gt, material_mask=mask_all)
-    loss_ao = F.l1_loss(ao_pred, ao_gt)
+    loss_ao = F.l1_loss(ao_pred, ao_gt).float()
     ecpoch_data["unet_maps"][key]["ao_loss"] += loss_ao.item()
 
     # Height
     # l1_height = masked_l1(height_pred, height_gt, mask_all)
-    l1_height = F.l1_loss(height_pred, height_gt)
+    l1_height = F.l1_loss(height_pred, height_gt).float()
     ecpoch_data["unet_maps"][key]["height_l1_loss"] += l1_height.item()
     # Gradient total variation (TV) smoothness penalty
     # [w0 - w1, w1 - w2, ..., wN-1 - wN]
-    dx = torch.abs(height_pred[..., :-1] - height_pred[..., 1:]).mean()
+    dx = torch.abs(height_pred[..., :-1] - height_pred[..., 1:]).mean().float()
     # [h0 - h1, h1 - h2, ..., hN-1 - hN]
-    dy = torch.abs(height_pred[..., :-1, :] - height_pred[..., 1:, :]).mean()
+    dy = torch.abs(height_pred[..., :-1, :] - height_pred[..., 1:, :]).mean().float()
     tv = dx + dy
     grad_penalty = 0.01 * tv
     ecpoch_data["unet_maps"][key]["height_tv_penalty"] += grad_penalty.item()
@@ -554,6 +563,7 @@ def do_train():
         sampler=train_sampler,
         # num_workers=4,
         shuffle=False,
+        pin_memory=True,  # Enable pin_memory for faster data transfer to GPU
     )
 
     validation_loader = DataLoader(
@@ -561,6 +571,7 @@ def do_train():
         batch_size=BATCH_SIZE,
         shuffle=False,  # No need to shuffle validation data
         # num_workers=6,
+        pin_memory=True,  # Enable pin_memory for faster data transfer to GPU
     )
 
     optimizer = torch.optim.AdamW(
@@ -680,6 +691,10 @@ def do_train():
             unet_albedo_loss = calculate_unet_albedo_loss(
                 albedo_pred, albedo_gt, category, epoch_data, key="train"
             )
+            if torch.isnan(unet_albedo_loss):
+                raise ValueError(
+                    "Unet-Albedo loss is NaN, stopping training to avoid further issues."
+                )
 
             # Get albedo input for UNet-maps
             if epoch < teacher_epochs:
@@ -727,6 +742,11 @@ def do_train():
                 key="train",
             )
 
+            if torch.isnan(unet_maps_loss):
+                raise ValueError(
+                    "Unet-Maps loss is NaN, stopping training to avoid further issues."
+                )
+
             epoch_data["train"]["batch_count"] += 1
 
             # Total loss
@@ -744,6 +764,8 @@ def do_train():
                 scaler.update()
                 optimizer.zero_grad()
                 scheduler.step()
+
+        calculate_avg(epoch_data, key="train")
 
         unet_alb.eval()
         unet_maps.eval()
@@ -897,7 +919,6 @@ def do_train():
 
                         samples_saved_per_class[cat_name] += 1
 
-        calculate_avg(epoch_data, key="train")
         unet_albedo_total_val_loss, unet_maps_total_val_loss = calculate_avg(
             epoch_data, key="validation"
         )
