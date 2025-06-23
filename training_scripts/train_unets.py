@@ -455,19 +455,26 @@ def calculate_unet_maps_loss(
     ecpoch_data["unet_maps"][key]["rough_loss"] += loss_rough.item()
 
     # Metal
-    metal_positive = metallic_gt.sum().clamp(min=1.0)
-    metal_negative = (metallic_gt.numel() - metal_positive).clamp(min=1.0)
-    metal_ratio_raw = (metal_negative / metal_positive).sqrt().clamp(max=20.0)
-    metal_normaliser = (metal_ratio_raw * metal_positive + metal_negative) / (
-        metal_positive + metal_negative
+    metal_positive = metallic_gt.sum().float()
+    metal_negative = (metallic_gt.numel() - metal_positive).float()
+    metal_weights = ((metal_negative + 1e-6) / (metal_positive + 1e-6)).clamp(
+        min=1.0, max=20.0
     )
-    metal_weight = metal_ratio_raw / metal_normaliser
-    non_metal_weight = 1.0 / metal_normaliser
-    weight_map = torch.where(metallic_gt > 0.5, metal_weight, non_metal_weight)
-
     loss_metal = F.binary_cross_entropy_with_logits(
-        metallic_pred, metallic_gt, weight=weight_map, reduction="mean"
+        metallic_pred, metallic_gt, pos_weight=metal_weights, reduction="mean"
     )
+
+    # metal_ratio_raw = (metal_negative / metal_positive).sqrt().clamp(max=20.0)
+    # metal_normaliser = (metal_ratio_raw * metal_positive + metal_negative) / (
+    #     metal_positive + metal_negative
+    # )
+    # metal_weight = metal_ratio_raw / metal_normaliser
+    # non_metal_weight = 1.0 / metal_normaliser
+    # weight_map = torch.where(metallic_gt > 0.5, metal_weight, non_metal_weight)
+
+    # loss_metal = F.binary_cross_entropy_with_logits(
+    #     metallic_pred, metallic_gt, weight=weight_map, reduction="mean"
+    # )
 
     # loss_metal = F.binary_cross_entropy_with_logits(
     #     metallic_pred,
@@ -954,7 +961,7 @@ def do_train():
         with open(output_dir / f"epoch_{epoch + 1}_stats.json", "w") as f:
             json.dump(epoch_data, f, indent=4)
 
-        if unet_albedo_total_val_loss < best_val_loss_albedo * 0.99:
+        if unet_albedo_total_val_loss < best_val_loss_albedo:
             best_val_loss_albedo = unet_albedo_total_val_loss
             no_improvement_count_albedo = 0
         else:
@@ -973,7 +980,7 @@ def do_train():
 
                 albedo_frozen = True
 
-        if unet_maps_total_val_loss < best_val_loss_maps * 0.99:
+        if unet_maps_total_val_loss < best_val_loss_maps:
             best_val_loss_maps = unet_maps_total_val_loss
             no_improvement_count_maps = 0
         else:
