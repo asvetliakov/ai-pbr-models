@@ -437,7 +437,7 @@ def calculate_unet_maps_loss(
         }
 
     w_rough = 1.0  # Weight for roughness loss
-    w_metal = 3.0  # Weight for metallic loss
+    w_metal = 2.0  # Weight for metallic loss
     w_ao = 1.0  # Weight for AO loss
     w_height = 1.0  # Weight for height loss
 
