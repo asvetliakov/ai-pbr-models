@@ -125,11 +125,11 @@ if checkpoint is not None:
 
 
 # ! Set metal bias # to a value that corresponds to 8.4% metal pixels in the dataset to prevent early collapse
-p0 = 0.084
-b0 = -math.log((1 - p0) / p0)  # ≈ -2.36
-with torch.no_grad():
-    torch.nn.init.constant_(unet_maps.head_metal[0].bias, b0)  # type: ignore
-    # print(unet_maps.head_metal[0].bias)
+# p0 = 0.084
+# b0 = -math.log((1 - p0) / p0)  # ≈ -2.36
+# with torch.no_grad():
+#     torch.nn.init.constant_(unet_maps.head_metal[0].bias, b0)  # type: ignore
+# print(unet_maps.head_metal[0].bias)
 
 
 def get_transform_train(
@@ -436,6 +436,11 @@ def calculate_unet_maps_loss(
             "total_loss": 0.0,
         }
 
+    w_rough = 1.0  # Weight for roughness loss
+    w_metal = 3.0  # Weight for metallic loss
+    w_ao = 1.0  # Weight for AO loss
+    w_height = 1.0  # Weight for height loss
+
     # Calculate masks
     # mask_all = torch.ones_like(roughness_gt, dtype=torch.bool)  # (B, 1, H, W)
     # mask_metal = (
@@ -462,6 +467,8 @@ def calculate_unet_maps_loss(
     ecpoch_data["unet_maps"][key]["rought_ssim_loss"] += ssim_rough_loss.item()
 
     loss_rough = l1_rough + 0.05 * ssim_rough_loss
+
+    loss_rough = loss_rough * w_rough  # Apply weight
     ecpoch_data["unet_maps"][key]["rough_loss"] += loss_rough.item()
 
     # Metal
@@ -473,6 +480,7 @@ def calculate_unet_maps_loss(
     loss_metal = F.binary_cross_entropy_with_logits(
         metallic_pred, metallic_gt, pos_weight=metal_weights, reduction="mean"
     )
+    loss_metal = loss_metal * w_metal  # Apply weight
 
     # metal_ratio_raw = (metal_negative / metal_positive).sqrt().clamp(max=20.0)
     # metal_normaliser = (metal_ratio_raw * metal_positive + metal_negative) / (
@@ -500,6 +508,7 @@ def calculate_unet_maps_loss(
     # AO, since every pixel is important, we use a mask of ones
     # loss_ao = masked_l1(ao_pred, ao_gt, material_mask=mask_all)
     loss_ao = F.l1_loss(ao_pred, ao_gt).float()
+    loss_ao = loss_ao * w_ao  # Apply weight
     ecpoch_data["unet_maps"][key]["ao_loss"] += loss_ao.item()
 
     # Height
@@ -516,10 +525,14 @@ def calculate_unet_maps_loss(
     ecpoch_data["unet_maps"][key]["height_tv_penalty"] += grad_penalty.item()
 
     loss_height = l1_height + grad_penalty
+    loss_height = loss_height * w_height  # Apply weight
     # Since every pixel is important, we use a mask of ones
     ecpoch_data["unet_maps"][key]["height_loss"] += loss_height.item()
 
-    loss_total = (loss_rough + loss_metal + loss_ao + loss_height) / 4.0
+    # loss_total = (loss_rough + loss_metal + loss_ao + loss_height) / 4.0
+    loss_total = (loss_rough + loss_metal + loss_ao + loss_height) / (
+        w_rough + w_metal + w_ao + w_height
+    )
     ecpoch_data["unet_maps"][key]["total_loss"] += loss_total.item()
 
     return loss_total
@@ -593,7 +606,8 @@ def do_train():
         sampler=train_sampler,
         # num_workers=4,
         shuffle=False,
-        pin_memory=True,  # Enable pin_memory for faster data transfer to GPU
+        # Hungs sometimes if enabled
+        # pin_memory=True,  # Enable pin_memory for faster data transfer to GPU
     )
 
     validation_loader = DataLoader(
@@ -601,7 +615,8 @@ def do_train():
         batch_size=BATCH_SIZE,
         shuffle=False,  # No need to shuffle validation data
         # num_workers=6,
-        pin_memory=True,  # Enable pin_memory for faster data transfer to GPU
+        # Hungs sometimes if enabled
+        # pin_memory=True,  # Enable pin_memory for faster data transfer to GPU
     )
 
     optimizer = torch.optim.AdamW(
