@@ -6,6 +6,7 @@ import random
 import multiprocessing
 import torch.nn.functional as F
 import lpips
+import math
 import argparse
 from typing import Callable
 from unet_models import UNetAlbedo, UNetMaps
@@ -107,6 +108,7 @@ unet_maps = UNetMaps(
     device
 )  # type: ignore
 
+
 checkpoint = None
 resume_training = args.resume
 if (args.load_checkpoint is not None) and Path(args.load_checkpoint).resolve().exists():
@@ -120,6 +122,14 @@ if checkpoint is not None:
     print("Loading model weights from checkpoint...")
     unet_alb.load_state_dict(checkpoint["unet_albedo_model_state_dict"])
     unet_maps.load_state_dict(checkpoint["unet_maps_model_state_dict"])
+
+
+# ! Set metal bias # to a value that corresponds to 8.4% metal pixels in the dataset to prevent early collapse
+p0 = 0.084
+b0 = -math.log((1 - p0) / p0)  # ≈ -2.36
+with torch.no_grad():
+    torch.nn.init.constant_(unet_maps.head_metal[0].bias, b0)  # type: ignore
+    # print(unet_maps.head_metal[0].bias)
 
 
 def get_transform_train(
@@ -870,7 +880,7 @@ def do_train():
                         category[k].item()
                     ]  # Get the category name
 
-                    if samples_saved_per_class[cat_name] < 4:
+                    if samples_saved_per_class[cat_name] < 8:
                         # Save 2 samples per class for inspection
                         output_path = output_dir / f"val_samples_{epoch + 1}/{cat_name}"
                         output_path.mkdir(parents=True, exist_ok=True)

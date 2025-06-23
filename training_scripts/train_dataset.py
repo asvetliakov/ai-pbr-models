@@ -158,8 +158,10 @@ class SimpleImageDataset(Dataset):
         loss_weights = 1.0 / torch.sqrt(freq + 1e-6)  # avoid ÷0
         loss_weights *= num_classes / loss_weights.sum()
 
-        sample_weighs_per_class = 1.0 / (cls_counts + 1e-6)
-        sample_weights = sample_weighs_per_class[all_labels]
+        sample_weights_per_class = 1.0 / (cls_counts + 1e-6)
+        # Boost metal class weight so it will appear more often
+        sample_weights_per_class[self.METAL_IDX] *= 1.5
+        sample_weights = sample_weights_per_class[all_labels]
 
         return loss_weights, sample_weights
 
