@@ -54,6 +54,13 @@ parser.add_argument(
     help="Whether to resume training from the last checkpoint",
 )
 
+parser.add_argument(
+    "--load_best_loss",
+    type=bool,
+    default=False,
+    help="Whether to load the best validation loss from the checkpoint",
+)
+
 args = parser.parse_args()
 
 print(f"Training phase: {args.phase}")
@@ -359,6 +366,10 @@ def do_train():
         scaler.load_state_dict(best_model_checkpoint["scaler_state_dict"])
 
     best_val_loss = float("inf")
+    if best_model_checkpoint is not None and args.load_best_loss and resume_training:
+        best_val_loss = best_model_checkpoint["epoch_data"]["val_loss"]
+        print(f"Loaded best validation loss: {best_val_loss}")
+
     patience = 6
     patience_min_delta = 0.005
     no_improvement_count = 0

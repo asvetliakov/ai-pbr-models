@@ -192,6 +192,7 @@ def get_transform_train(
         # to_tensor() is normalizing 8 bit images ( / 255 ) so for 16bit we need to do it manually
         height_arr = np.array(height, dtype=np.uint16)
         height_arr = height_arr.astype(np.float32) / 65535.0  # Normalize to [0, 1]
+
         height = torch.from_numpy(height_arr).unsqueeze(0)
 
         metallic = TF.to_tensor(metallic)  # type: ignore
