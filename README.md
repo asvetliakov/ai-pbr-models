@@ -30,11 +30,11 @@ Class weights = `1 / √freq(class)`; WeightedRandomSampler active in every phas
 
 ## 2. UNet-Albedo (A)
 
-| Phase  | Dataset mix         | Trainables           | Crop     | Augment†             | Epochs | Opt & LR          | Scheduler | Loss                       |
-| ------ | ------------------- | -------------------- | -------- | -------------------- | ------ | ----------------- | --------- | -------------------------- |
-| **A1** | 100 % MatSynth      | **full UNet + FiLM** | 256²     | flips · rot · colour | 35     | AdamW 5e-5→1e-5   | OneCycle  | L1 + 0.1 SSIM + 0.05 LPIPS |
-| **A2** | 25 % Mat / 75 % Sky | decoder + FiLM       | 512→768  | A1 + SkyPhoto 0.6    | 10     | AdamW 1e-5        | cosine-10 | same                       |
-| **A3** | 100 % Sky           | final 1×1 head       | full 1 K | none                 | 3      | Adam 5e-6 (×0.25) | Exp 0.9   | same                       |
+| Phase          | Dataset mix         | Trainables           | Crop         | Augment†             | Epochs | Opt & LR        | Scheduler | Loss                       |
+| -------------- | ------------------- | -------------------- | ------------ | -------------------- | ------ | --------------- | --------- | -------------------------- |
+| **A1**         | 100 % MatSynth      | **full UNet + FiLM** | 256²         | flips · rot · colour | 35     | AdamW 5e-5→1e-5 | OneCycle  | L1 + 0.1 SSIM + 0.05 LPIPS |
+| **A2**         | 25 % Mat / 75 % Sky | decoder + FiLM       | 512→768      | A1 + SkyPhoto 0.6    | 10     | AdamW 1e-5      | cosine-10 | same                       |
+| **A3-default** | 100 % Sky           | **1 × 1 head only**  | **full 2 K** | none                 | 3      | Adam 5e-7       | Exp 0.9   | same                       |
 
 _Save **best A2 checkpoint** → encoder weight donor for Maps._
 
@@ -60,11 +60,11 @@ bce = torch.nn.BCEWithLogitsLoss(pos_weight = neg/pos)
 
 ## 4. Curriculum snapshot
 
-| Block | SegFormer       | Albedo          | Maps                           |
-| ----- | --------------- | --------------- | ------------------------------ |
-| Early | S0–S1 (256)     | A1 (256)        | —                              |
-| Mid   | S2–S3 (512–768) | A2 (512–768)    | **M-pre (768-1 K) → M0 (1 K)** |
-| Late  | S5 (2 K)        | A3 (1 K polish) | **M1 (2 K per-head)**          |
+| Block | SegFormer       | Albedo               | Maps                       |
+| ----- | --------------- | -------------------- | -------------------------- |
+| Early | S0–S1 (256)     | A1 (256)             | —                          |
+| Mid   | S2–S3 (512-768) | A2 (512-768)         | M-pre (768-1 K) → M0 (1 K) |
+| Late  | S5 (2 K)        | **A3-default (2 K)** | M1 (2 K per-head)          |
 
 ## 5. Augmentation key
 
