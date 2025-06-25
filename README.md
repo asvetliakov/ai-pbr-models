@@ -1,7 +1,5 @@
 # 🏔️ Skyrim PBR Pipeline — Rev 6.0 (26 Jun 2025)
 
-_All hyper-params assume fp16 + `channels_last` on a 24 GB GPU. Adjust batch-size ↔ LR linearly._
-
 ---
 
 ## 0. Legend
