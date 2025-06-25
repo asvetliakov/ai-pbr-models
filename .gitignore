@@ -5,3 +5,5 @@ matsynth_category_samples
 __pycache__
 segformer_sample_test
 test_output
+skyrim_samples
+skyrim_processed
