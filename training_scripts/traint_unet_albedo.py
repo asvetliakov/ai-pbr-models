@@ -102,7 +102,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 unet_alb = UNetAlbedo(
     in_ch=6,  # RGB + Normal
-    cond_ch=256,  # Condition channel size, can be adjusted
+    cond_ch=512,  # Condition channel size, can be adjusted
 ).to(
     device
 )  # type: ignore
@@ -443,7 +443,7 @@ def do_train():
         )
         validation_dataset.set_transform(transform_val_fn)
 
-        # My RTX 5090 doesn't have enough memory for batch size 4, so using 2 with accumulation
+        # Batch size = 4 fits into VRAM of 5090 but it's slow. Much faster to use gradient accumulation with batch size = 2
         accum_steps = 2
 
         epoch_data = {
@@ -481,7 +481,7 @@ def do_train():
                         )
                         .hidden_states[-1]
                         .detach()
-                    )  # (B,256,H/16,W/16)
+                    )
 
             with autocast(device_type=device.type):
                 # Get UNet-Albedo prediction

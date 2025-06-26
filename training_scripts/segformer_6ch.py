@@ -1,11 +1,12 @@
 import torch
-from transformers import SegformerForSemanticSegmentation, logger
+from transformers import SegformerForSemanticSegmentation
+from transformers.utils import logging
 
 
 def create_segformer(
     num_labels: int, device: torch.device
 ) -> SegformerForSemanticSegmentation:
-    logger.setLevel("ERROR")
+    logging.set_verbosity_error()  # Suppress warnings from transformers
     model = SegformerForSemanticSegmentation.from_pretrained(
         "nvidia/segformer-b2-finetuned-ade-512-512",
         num_labels=num_labels,  # Number of classes for segmentation
