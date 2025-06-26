@@ -28,11 +28,11 @@ Class weights = `1 / √freq(class)`; WeightedRandomSampler active in every phas
 
 ## 2. UNet-Albedo (A)
 
-| Phase          | Dataset mix         | Trainables           | Crop         | Augment†             | Epochs | Opt & LR        | Scheduler | Loss                       |
-| -------------- | ------------------- | -------------------- | ------------ | -------------------- | ------ | --------------- | --------- | -------------------------- |
-| **A1**         | 100 % MatSynth      | **full UNet + FiLM** | 256²         | flips · rot · colour | 35     | AdamW 5e-5→1e-5 | OneCycle  | L1 + 0.1 SSIM + 0.05 LPIPS |
-| **A2**         | 25 % Mat / 75 % Sky | decoder + FiLM       | 512→768      | A1 + SkyPhoto 0.6    | 10     | AdamW 1e-5      | cosine-10 | same                       |
-| **A3-default** | 100 % Sky           | **1 × 1 head only**  | **full 2 K** | none                 | 3      | Adam 5e-7       | Exp 0.9   | same                       |
+| Phase          | Dataset mix         | Trainables           | Crop         | Augment†             | Epochs | Opt & LR                                                                                                             | Scheduler                                                                   | Loss                       |
+| -------------- | ------------------- | -------------------- | ------------ | -------------------- | ------ | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | -------------------------- |
+| **A1**         | 100 % MatSynth      | **full UNet + FiLM** | 256²         | flips · rot · colour | 35     | AdamW b1=0.9, b2=0.999, eps=1e-8, _per group LR_<br> _enc_: 2e-4<br> _dec_: 2e-4<br> _film_: 3e-4<br> _head_: 2.5e-4 | OneCycle, pct=0.2, anneal_strategy=cos,<br> finalLr=1e-5, (f_div_factor=20) | L1 + 0.1 SSIM + 0.05 LPIPS |
+| **A2**         | 25 % Mat / 75 % Sky | decoder + FiLM       | 512→768      | A1 + SkyPhoto 0.6    | 10     | AdamW 1e-5                                                                                                           | cosine-10                                                                   | same                       |
+| **A3-default** | 100 % Sky           | **1 × 1 head only**  | **full 2 K** | none                 | 3      | Adam 5e-7                                                                                                            | Exp 0.9                                                                     | same                       |
 
 _Save **best A2 checkpoint** → encoder weight donor for Maps._
 

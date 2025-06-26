@@ -383,9 +383,18 @@ def do_train():
         # pin_memory=True,  # Enable pin_memory for faster data transfer to GPU
     )
 
+    enc_params = {"params": unet_alb.unet.encoder.parameters(), "lr": 2e-4}
+    dec_params = {"params": unet_alb.unet.decoder.parameters(), "lr": 2e-4}
+    film_params = {"params": unet_alb.unet.film.parameters(), "lr": 3e-4}  # type: ignore
+    head_params = {"params": unet_alb.out.parameters(), "lr": 2.5e-4}
+
     optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, unet_alb.parameters()),
-        lr=LR,
+        # filter(lambda p: p.requires_grad, unet_alb.parameters()),
+        # lr=LR,
+        # weight_decay=WD,
+        [enc_params, dec_params, film_params, head_params],
+        betas=(0.9, 0.999),
+        eps=1e-8,
         weight_decay=WD,
     )
     if checkpoint is not None and resume_training:
@@ -393,14 +402,22 @@ def do_train():
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_MAX)
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer,
+    #     max_lr=LR,
+    #     total_steps=EPOCHS * len(train_loader),
+    #     # 15% warm-up 85% cooldown
+    #     pct_start=0.15,
+    #     div_factor=5.0,  # start LR = 1e-5
+    #     final_div_factor=5.0,  # End LR = 1e-5
+    # )
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=LR,
+        max_lr=[2e-4, 2e-4, 3e-4, 2.5e-4],
         total_steps=EPOCHS * len(train_loader),
-        # 15% warm-up 85% cooldown
-        pct_start=0.15,
-        div_factor=5.0,  # start LR = 1e-5
-        final_div_factor=5.0,  # End LR = 1e-5
+        pct_start=0.2,
+        anneal_strategy="cos",
+        final_div_factor=20,  # final LR ≈ max/20 ≈ 1e-5
     )
     if checkpoint is not None and resume_training:
         print("Loading scheduler state from checkpoint.")
