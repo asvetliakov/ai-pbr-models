@@ -464,7 +464,7 @@ def cycle(dl: DataLoader):
 # Training loop
 def do_train():
     print(
-        f"Starting training for {EPOCHS} epochs, on {len(matsynth_train_dataset)} MatSynth samples and {int(len(skyrim_train_dataset) * 0.25)} Skyrim samples, validation on {len(matsynth_validation_dataset)} MatSynth samples and {int(len(skyrim_validation_dataset) * 0.25)} Skyrim samples."
+        f"Starting training for {EPOCHS} epochs, on {len(matsynth_train_dataset)} MatSynth samples and {int(len(matsynth_train_dataset) * 0.25)} Skyrim samples, validation on {len(matsynth_validation_dataset)} MatSynth samples and {int(len(matsynth_validation_dataset) * 0.25)} Skyrim samples."
     )
 
     matsynth_train_loader = DataLoader(
@@ -651,7 +651,16 @@ def do_train():
                     dim=1
                 ).max(dim=1)
                 # build a mask of high-confidence pixels
-                skyrim_mask = skyrim_confidence >= 0.8
+                skyrim_base_mask = skyrim_confidence >= 0.8
+
+                # Our confidence for fabric is not great from S1 checkpoint so use a lower threshold
+                skyrim_fabric_mask = (
+                    skyrim_pred_labels
+                    == matsynth_train_dataset.CLASS_LIST_IDX_MAPPING["fabric"]
+                ) & (skyrim_confidence > 0.6)
+
+                skyrim_mask = skyrim_base_mask | skyrim_fabric_mask
+
                 if skyrim_mask.any():
 
                     # for the masked CE, we still need “labels”—
@@ -683,10 +692,6 @@ def do_train():
             scaler.scale(total_loss).backward()
             scaler.step(optimizer)
             scaler.update()
-
-            bar.update(1)
-
-        bar.close()
 
         matsynth_train_loss_avg = matsynth_loss_sum / train_batch_count
         skyrim_train_loss_avg = skyrim_loss_sum / train_batch_count
@@ -770,7 +775,15 @@ def do_train():
                         dim=1
                     ).max(dim=1)
                     # build a mask of high-confidence pixels
-                    skyrim_mask = skyrim_confidence >= 0.8
+                    skyrim_base_mask = skyrim_confidence >= 0.8
+
+                    # Our confidence for fabric is not great from S1 checkpoint so use a lower threshold
+                    skyrim_fabric_mask = (
+                        skyrim_pred_labels
+                        == matsynth_train_dataset.CLASS_LIST_IDX_MAPPING["fabric"]
+                    ) & (skyrim_confidence > 0.6)
+
+                    skyrim_mask = skyrim_base_mask | skyrim_fabric_mask
 
                     if skyrim_mask.any():
                         # % of pixels above 0.8
@@ -817,8 +830,6 @@ def do_train():
                 val_matsynth_loss_sum += matsynth_loss.item()
                 val_loss_sum += total_loss.item()
                 val_batch_count += 1
-
-                bar.update(1)
 
         val_loss_avg = val_loss_sum / val_batch_count
         val_matsynth_loss_avg = val_matsynth_loss_sum / val_batch_count
