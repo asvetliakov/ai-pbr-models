@@ -24,6 +24,7 @@ from augmentations import (
     get_random_crop,
     selective_aug,
     center_crop,
+    get_crop_size,
 )
 from segformer_6ch import create_segformer
 
@@ -151,10 +152,14 @@ def get_transform_train(
         category_name = example["category_name"]
         name = example["name"]
 
+        crop_size = get_crop_size(
+            epoch=current_epoch, total_epochs=EPOCHS, min_size=256, max_size=512
+        )
+
         albedo, normal, diffuse, *_ = get_random_crop(
             albedo=albedo,
             normal=normal,
-            size=(256, 256),  # Crop size for training
+            size=(crop_size, crop_size),  # Crop size for training
             diffuse=diffuse,
             resize_to=[1024, 1024],  # Resize to 1024x1024 for training
             augmentations=safe_augmentations,
@@ -199,72 +204,79 @@ def get_transform_train(
     return transform_train_fn
 
 
-def transform_val_fn(example):
-    albedo = example["basecolor"]
-    normal = example["normal"]
-    diffuse = example["diffuse"]
-    category = example["category"]
-    name = example["name"]
+def get_transform_val(current_epoch: int) -> Callable:
+    def transform_val_fn(example):
+        albedo = example["basecolor"]
+        normal = example["normal"]
+        diffuse = example["diffuse"]
+        category = example["category"]
+        name = example["name"]
 
-    albedo = center_crop(
-        albedo,
-        size=(256, 256),
-        resize_to=[1024, 1024],
-        interpolation=TF.InterpolationMode.LANCZOS,
-    )
-    diffuse = center_crop(
-        diffuse,
-        size=(256, 256),
-        resize_to=[1024, 1024],
-        interpolation=TF.InterpolationMode.LANCZOS,
-    )
-
-    normal = normalize_normal_map(
-        center_crop(
-            normal,
-            size=(256, 256),
-            resize_to=[1024, 1024],
-            interpolation=TF.InterpolationMode.BILINEAR,
+        crop_size = get_crop_size(
+            epoch=current_epoch, total_epochs=EPOCHS, min_size=256, max_size=512
         )
-    )
 
-    albedo_orig = albedo
-    albedo_segformer = albedo
+        albedo = center_crop(
+            albedo,
+            size=(crop_size, crop_size),
+            resize_to=[1024, 1024],
+            interpolation=TF.InterpolationMode.LANCZOS,
+        )
+        diffuse = center_crop(
+            diffuse,
+            size=(crop_size, crop_size),
+            resize_to=[1024, 1024],
+            interpolation=TF.InterpolationMode.LANCZOS,
+        )
 
-    # Store original non normalized diffuse and normal for visual inspection in validation loop
-    original_normal = TF.to_tensor(normal)
-    original_diffuse = TF.to_tensor(diffuse)
+        normal = normalize_normal_map(
+            center_crop(
+                normal,
+                size=(crop_size, crop_size),
+                resize_to=[1024, 1024],
+                interpolation=TF.InterpolationMode.BILINEAR,
+            )
+        )
 
-    diffuse = TF.to_tensor(diffuse)
-    diffuse = TF.normalize(
-        diffuse, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
-    )
+        albedo_orig = albedo
+        albedo_segformer = albedo
 
-    normal = TF.to_tensor(normal)
-    normal = TF.normalize(
-        normal, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
-    )
-    diffuse_and_normal = torch.cat((diffuse, normal), dim=0)
+        # Store original non normalized diffuse and normal for visual inspection in validation loop
+        original_normal = TF.to_tensor(normal)
+        original_diffuse = TF.to_tensor(diffuse)
 
-    albedo_orig = TF.to_tensor(albedo_orig)
+        diffuse = TF.to_tensor(diffuse)
+        diffuse = TF.normalize(
+            diffuse, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
+        )
 
-    albedo_segformer = TF.to_tensor(albedo_segformer)
-    albedo_segformer = TF.normalize(
-        albedo_segformer, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
-    )
+        normal = TF.to_tensor(normal)
+        normal = TF.normalize(
+            normal, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
+        )
+        diffuse_and_normal = torch.cat((diffuse, normal), dim=0)
 
-    albedo_and_normal_segformer = torch.cat((albedo_segformer, normal), dim=0)
+        albedo_orig = TF.to_tensor(albedo_orig)
 
-    return {
-        "diffuse_and_normal": diffuse_and_normal,
-        "albedo_and_normal_segformer": albedo_and_normal_segformer,
-        "albedo": albedo_orig,
-        "normal": normal,
-        "category": category,
-        "name": name,
-        "original_diffuse": original_diffuse,
-        "original_normal": original_normal,
-    }
+        albedo_segformer = TF.to_tensor(albedo_segformer)
+        albedo_segformer = TF.normalize(
+            albedo_segformer, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
+        )
+
+        albedo_and_normal_segformer = torch.cat((albedo_segformer, normal), dim=0)
+
+        return {
+            "diffuse_and_normal": diffuse_and_normal,
+            "albedo_and_normal_segformer": albedo_and_normal_segformer,
+            "albedo": albedo_orig,
+            "normal": normal,
+            "category": category,
+            "name": name,
+            "original_diffuse": original_diffuse,
+            "original_normal": original_normal,
+        }
+
+    return transform_val_fn
 
 
 _lpips = lpips.LPIPS(net="vgg").to(device).eval()
@@ -458,7 +470,7 @@ def do_train():
                 color_augmentations=(epoch + 1) > 5,
             )
         )
-        validation_dataset.set_transform(transform_val_fn)
+        validation_dataset.set_transform(get_transform_train(epoch + 1))
 
         # Batch size = 4 fits into VRAM of 5090 but it's slow. Much faster to use gradient accumulation with batch size = 2
         accum_steps = 2

@@ -14,6 +14,11 @@ from train_dataset import normalize_normal_map
 # import cv2
 
 
+def get_crop_size(epoch: int, total_epochs: int, min_size: int, max_size: int):
+    t = (epoch - 1) / (total_epochs - 1)
+    return int(min_size + t * (max_size - min_size))
+
+
 def center_crop(
     image: Image.Image,
     size: tuple[int, int],
