@@ -4,6 +4,9 @@ import json, torch
 import numpy as np
 import multiprocessing
 import random
+import math
+from peft import LoraConfig, get_peft_model, TaskType
+from types import MethodType
 from typing import Callable
 from pathlib import Path
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -22,12 +25,15 @@ from transformers.utils.constants import (
     IMAGENET_STANDARD_STD,
 )
 from train_dataset import SimpleImageDataset, normalize_normal_map
+from skyrim_dataset import SkyrimDataset
 from augmentations import (
     get_random_crop,
     make_full_image_mask,
     selective_aug,
     center_crop,
+    get_crop_size,
 )
+from skyrim_photometric_aug import SkyrimPhotometric
 
 parser = argparse.ArgumentParser(
     description="Train Segformer for Semantic Segmentation"
@@ -70,8 +76,8 @@ from torch.amp.autocast_mode import autocast
 
 # HYPER_PARAMETERS
 BATCH_SIZE = 4  # Batch size for training
-EPOCHS = 35  # Number of epochs to train
-LR = 5e-5  # Learning rate for the optimizer
+EPOCHS = 10  # Number of epochs to train
+LR = 1e-5  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
 # PHASE = "a"  # Phase of the training per plan, used for logging and saving
@@ -83,29 +89,36 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True  # Enable for faster training on fixed input sizes
 
 matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
+skyrim_dir = (BASE_DIR / "../skyrim_processed").resolve()
 
 device = torch.device("cuda")
 
-train_dataset = SimpleImageDataset(
+matsynth_train_dataset = SimpleImageDataset(
     matsynth_dir=str(matsynth_dir),
     split="train",
 )
 
-validation_dataset = SimpleImageDataset(
+matsynth_validation_dataset = SimpleImageDataset(
     matsynth_dir=str(matsynth_dir),
     split="validation",
     skip_init=True,
 )
-validation_dataset.all_validation_samples = train_dataset.all_validation_samples
+matsynth_validation_dataset.all_validation_samples = (
+    matsynth_train_dataset.all_validation_samples
+)
 
-loss_weights, sample_weights = train_dataset.get_weights()
+loss_weights, sample_weights = matsynth_train_dataset.get_weights()
 
 loss_weights = loss_weights.to(device)  # type: ignore
 
-seg_loss_fn = torch.nn.CrossEntropyLoss(weight=loss_weights, ignore_index=255)
-seq_per_class_fn = torch.nn.CrossEntropyLoss(
-    weight=loss_weights, ignore_index=255, reduction="none"
-)
+with autocast(device_type=device.type):
+    matsynth_seg_loss_fn = torch.nn.CrossEntropyLoss(
+        weight=loss_weights, ignore_index=255
+    )
+    matsynth_seq_per_class_fn = torch.nn.CrossEntropyLoss(
+        weight=loss_weights, ignore_index=255, reduction="none"
+    )
+    skyrim_seg_loss_fn = torch.nn.CrossEntropyLoss()
 
 # # Will pull random samples according to the sample weights
 train_sampler = WeightedRandomSampler(
@@ -114,8 +127,36 @@ train_sampler = WeightedRandomSampler(
     replacement=True,
 )
 
+skyrim_train_dataset = SkyrimDataset(
+    skyrim_dir=str(skyrim_dir),
+    split="train",
+    load_non_pbr=True,
+)
+
+skyrim_validation_dataset = SkyrimDataset(
+    skyrim_dir=str(skyrim_dir),
+    split="validation",
+    load_non_pbr=True,
+    skip_init=True,
+)
+skyrim_validation_dataset.all_validation_samples = (
+    skyrim_train_dataset.all_validation_samples
+)
+
+BATCH_SIZE_MATSYNTH = int(BATCH_SIZE * 0.75)  # 75% Matsynth
+BATCH_SIZE_SKYRIM = int(BATCH_SIZE * 0.25)  # 25% Skyrim
+
+# MAX_SAMPLES = max(len(matsynth_train_dataset), len(skyrim_train_dataset))
+STEPS_PER_EPOCH_TRAIN = math.ceil(len(matsynth_train_dataset) / BATCH_SIZE_MATSYNTH)
+STEPS_PER_EPOCH_VALIDATION = math.ceil(
+    len(matsynth_validation_dataset) / BATCH_SIZE_MATSYNTH
+)
+
+
 model = create_segformer(
-    num_labels=len(train_dataset.CLASS_LIST),  # Number of classes for segmentation
+    num_labels=len(
+        matsynth_train_dataset.CLASS_LIST
+    ),  # Number of classes for segmentation
     device=device,
 )
 
@@ -134,7 +175,42 @@ if best_model_checkpoint is not None:
     )
 
 
-def get_transform_train(
+# LoRA
+lora_config = LoraConfig(
+    r=8,  # Rank of the LoRA layers # type: ignore
+    lora_alpha=16,  # Scaling factor for the LoRA layers # type: ignore
+    target_modules=[  # type: ignore
+        "attention.self.query",
+        "attention.self.value",
+    ],  # Target modules to apply LoRA to
+    lora_dropout=0.05,  # Dropout rate for the LoRA layers # type: ignore
+    bias="none",  # No bias in LoRA layers # type: ignore
+    task_type=TaskType.FEATURE_EXTRACTION,  # type: ignore
+)
+model = get_peft_model(model, lora_config).to(device)
+
+
+def segformer_peft_forward(self, *args, **kwargs):
+    # 1) If PEFT passes input_ids=…, treat it as pixel_values.
+    if "input_ids" in kwargs and "pixel_values" not in kwargs:
+        kwargs["pixel_values"] = kwargs.pop("input_ids")
+    # 2) Call the original PEFT forward
+    return super(type(self), self).forward(*args, **kwargs)  # type: ignore
+
+
+# attach the shim
+model.forward = MethodType(segformer_peft_forward, model)
+
+# Freeze everything except the LoRA layers and decode head
+for p in model.parameters():
+    p.requires_grad = False
+
+for n, p in model.named_parameters():
+    if "lora_" in n or "decode_head" in n:
+        p.requires_grad = True
+
+
+def get_transform_train_matsynth(
     current_epoch: int,
     safe_augmentations=True,
     composites=True,
@@ -142,11 +218,12 @@ def get_transform_train(
 ) -> Callable:
     def transform_train_fn(example):
         # name = example["name"]
+        current_crop_size = get_crop_size(current_epoch, EPOCHS, 256, 512)
 
         # Upper left corner tuple for each cro
         positions = [(0, 0)]
         # h, w
-        crop_size = (256, 256)
+        crop_size = (current_crop_size, current_crop_size)
         # h, w
         tile_size = [1024, 1024]
         samples = [example]
@@ -159,9 +236,9 @@ def get_transform_train(
                 crop_size = (256, 256)
                 samples = [
                     example,
-                    train_dataset.get_random_sample(),
-                    train_dataset.get_random_sample(),
-                    train_dataset.get_random_sample(),
+                    matsynth_train_dataset.get_random_sample(),
+                    matsynth_train_dataset.get_random_sample(),
+                    matsynth_train_dataset.get_random_sample(),
                 ]
             # 30% chance of 2 random crops
             elif random.random() < 0.3:
@@ -170,7 +247,7 @@ def get_transform_train(
                 crop_size = (512, 256)
                 samples = [
                     example,
-                    train_dataset.get_random_sample(),
+                    matsynth_train_dataset.get_random_sample(),
                 ]
 
         final_albedo = Image.new("RGB", (1024, 1024))
@@ -255,71 +332,194 @@ def get_transform_train(
     return transform_train_fn
 
 
-def transform_val_fn(example):
-    albedo = example["basecolor"]
-    normal = example["normal"]
-    category = example["category"]
+def get_transform_train_skyrim(
+    current_epoch: int, safe_augmentations=True, photometric: float = 0.0
+) -> Callable:
+    def transform_train_fn(example):
+        # name = example["name"]
+        current_crop_size = get_crop_size(current_epoch, EPOCHS, 256, 512)
 
-    albedo = center_crop(albedo, (256, 256), [1024, 1024], TF.InterpolationMode.LANCZOS)
-    albedo = TF.to_tensor(albedo)
-    albedo = TF.normalize(albedo, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
+        image = example["basecolor"] if example["pbr"] else example["diffuse"]
+        normal = example["normal"]
 
-    normal = normalize_normal_map(
-        center_crop(normal, (256, 256), [1024, 1024], TF.InterpolationMode.BILINEAR)
-    )
-    normal = TF.to_tensor(normal)
-    normal = TF.normalize(
-        normal, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
-    )
+        final_image, final_normal, *_ = get_random_crop(
+            image,
+            normal,
+            size=(current_crop_size, current_crop_size),
+            augmentations=safe_augmentations,
+            resize_to=[1024, 1024],
+        )
+        if photometric > 0.0:
+            skyrim_photometric = SkyrimPhotometric(p_aug=photometric)
+            final_image = skyrim_photometric(final_image)
 
-    # Concatenate albedo and normal along the channel dimension
-    final = torch.cat((albedo, normal), dim=0)  # type: ignore
+        final_image = TF.to_tensor(final_image)
+        # Segformer has been trained with ImageNet default normalization
+        final_image = TF.normalize(
+            final_image, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
+        )
 
-    mask = make_full_image_mask(category_id=category, img_size=(1024, 1024))
+        final_normal = TF.to_tensor(final_normal)
+        final_normal = TF.normalize(
+            final_normal, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
+        )
 
-    return {
-        "pixel_values": final,
-        "labels": mask,
-        "category": category,  # keep for reference
-    }
+        # Concatenate albedo and normal along the channel dimension
+        final_sample = torch.cat((final_image, final_normal), dim=0)  # type: ignore
+
+        return {
+            "pixel_values": final_sample,
+        }
+
+    return transform_train_fn
+
+
+def get_transform_val_matsynth(current_epoch: int) -> Callable:
+    def transform_val_fn(example):
+        albedo = example["basecolor"]
+        normal = example["normal"]
+        category = example["category"]
+
+        crop_size = get_crop_size(current_epoch, EPOCHS, 256, 512)
+
+        albedo = center_crop(
+            albedo, (crop_size, crop_size), [1024, 1024], TF.InterpolationMode.LANCZOS
+        )
+        albedo = TF.to_tensor(albedo)
+        albedo = TF.normalize(
+            albedo, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
+        )
+
+        normal = normalize_normal_map(
+            center_crop(
+                normal,
+                (crop_size, crop_size),
+                [1024, 1024],
+                TF.InterpolationMode.BILINEAR,
+            )
+        )
+        normal = TF.to_tensor(normal)
+        normal = TF.normalize(
+            normal, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
+        )
+
+        # Concatenate albedo and normal along the channel dimension
+        final = torch.cat((albedo, normal), dim=0)  # type: ignore
+
+        mask = make_full_image_mask(category_id=category, img_size=(1024, 1024))
+
+        return {
+            "pixel_values": final,
+            "labels": mask,
+            "category": category,  # keep for reference
+        }
+
+    return transform_val_fn
+
+
+def get_transform_val_skyrim(current_epoch: int) -> Callable:
+    def transform_val_fn(example):
+        image = example["basecolor"] if example["pbr"] else example["diffuse"]
+        normal = example["normal"]
+
+        crop_size = get_crop_size(current_epoch, EPOCHS, 256, 512)
+
+        final_image = center_crop(
+            image, (crop_size, crop_size), [1024, 1024], TF.InterpolationMode.LANCZOS
+        )
+        final_image = TF.to_tensor(final_image)
+        final_image = TF.normalize(
+            final_image, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
+        )
+
+        final_normal = normalize_normal_map(
+            center_crop(
+                normal,
+                (crop_size, crop_size),
+                [1024, 1024],
+                TF.InterpolationMode.BILINEAR,
+            )
+        )
+        final_normal = TF.to_tensor(final_normal)
+        final_normal = TF.normalize(
+            final_normal, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
+        )
+
+        # Concatenate albedo and normal along the channel dimension
+        final = torch.cat((final_image, final_normal), dim=0)  # type: ignore
+
+        return {
+            "pixel_values": final,
+        }
+
+    return transform_val_fn
+
+
+def cycle(dl: DataLoader):
+    while True:
+        for batch in dl:
+            yield batch
 
 
 # Training loop
 def do_train():
     print(
-        f"Starting training for {EPOCHS} epochs, on {len(train_dataset)} samples, validation on {len(validation_dataset)} samples."
+        f"Starting training for {EPOCHS} epochs, on {len(matsynth_train_dataset)} MatSynth samples and {int(len(skyrim_train_dataset) * 0.25)} Skyrim samples, validation on {len(matsynth_validation_dataset)} MatSynth samples and {int(len(skyrim_validation_dataset) * 0.25)} Skyrim samples."
     )
 
-    train_loader = DataLoader(
-        train_dataset,  # type: ignore
-        batch_size=BATCH_SIZE,
+    matsynth_train_loader = DataLoader(
+        matsynth_train_dataset,  # type: ignore
+        batch_size=BATCH_SIZE_MATSYNTH,
         sampler=train_sampler,
         # num_workers=4,
         shuffle=False,
     )
 
-    validation_loader = DataLoader(
-        validation_dataset,  # type: ignore
-        batch_size=BATCH_SIZE,
+    matsynth_validation_loader = DataLoader(
+        matsynth_validation_dataset,  # type: ignore
+        batch_size=BATCH_SIZE_MATSYNTH,
         shuffle=False,  # No need to shuffle validation data
         # num_workers=6,
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WD)
+    skyrim_train_loader = DataLoader(
+        skyrim_train_dataset,
+        batch_size=BATCH_SIZE_SKYRIM,
+        shuffle=True,
+    )
+
+    skyrim_validation_loader = DataLoader(
+        skyrim_validation_dataset,
+        batch_size=BATCH_SIZE_SKYRIM,
+        shuffle=False,  # No need to shuffle validation data
+    )
+
+    matsynth_train_iter = cycle(matsynth_train_loader)
+    skyrim_train_iter = cycle(skyrim_train_loader)
+
+    matsynth_validation_iter = cycle(matsynth_validation_loader)
+    skyrim_validation_iter = cycle(skyrim_validation_loader)
+
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(
+        trainable, lr=LR, weight_decay=WD, betas=(0.9, 0.999), eps=1e-8
+    )
     if best_model_checkpoint is not None and resume_training:
         print("Loading optimizer state from checkpoint.")
         optimizer.load_state_dict(best_model_checkpoint["optimizer_state_dict"])
 
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_MAX)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=LR,
-        total_steps=EPOCHS * len(train_loader),
-        # 15% warm-up 85% cooldown
-        pct_start=0.15,
-        div_factor=5.0,  # start LR = 1e-5
-        final_div_factor=5.0,  # End LR = 1e-5
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=EPOCHS, eta_min=2e-6
     )
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer,
+    #     max_lr=LR,
+    #     total_steps=EPOCHS * len(train_loader),
+    #     # 15% warm-up 85% cooldown
+    #     pct_start=0.15,
+    #     div_factor=5.0,  # start LR = 1e-b
+    #     final_div_factor=5.0,  # End LR = 1e-5
+    # )
     if best_model_checkpoint is not None and resume_training:
         print("Loading scheduler state from checkpoint.")
         scheduler.load_state_dict(best_model_checkpoint["scheduler_state_dict"])
@@ -334,8 +534,7 @@ def do_train():
         best_val_loss = best_model_checkpoint["epoch_data"]["val_loss"]
         print(f"Loaded best validation loss: {best_val_loss}")
 
-    patience = 6
-    patience_min_delta = 0.005
+    patience = 3
     no_improvement_count = 0
 
     output_dir = Path(f"./weights/{PHASE}/segformer")
@@ -349,17 +548,25 @@ def do_train():
     for epoch in range(start_epoch, EPOCHS):
         model.train()
 
-        train_dataset.set_transform(
-            get_transform_train(
+        matsynth_train_dataset.set_transform(
+            get_transform_train_matsynth(
                 epoch + 1,
                 # Composites & flips are enabled from epoch 1
                 safe_augmentations=True,
                 composites=True,
                 # Color augmentations are enabled after warm-up (from epoch 6)
-                color_augmentations=(epoch + 1) > 5,
+                # color_augmentations=(epoch + 1) > 5,
+                color_augmentations=True,
             )
         )
-        validation_dataset.set_transform(transform_val_fn)
+        matsynth_validation_dataset.set_transform(get_transform_val_matsynth(epoch + 1))
+
+        skyrim_train_dataset.set_transform(
+            get_transform_train_skyrim(
+                epoch + 1, safe_augmentations=True, photometric=0.6
+            )
+        )
+        skyrim_validation_dataset.set_transform(get_transform_val_skyrim(epoch + 1))
 
         # For IoU
         # ! need to reest it here early due to GPU memory issues
@@ -369,126 +576,272 @@ def do_train():
         epoch_data = {
             "epoch": epoch + 1,
             "train_loss": 0.0,
+            "train_matsynth_loss": 0.0,
+            "train_skyrim_loss": 0.0,
             "val_loss": 0.0,
-            "per_class_loss": {name: 0.0 for name in train_dataset.CLASS_LIST},
-            "IoU": {name: 0.0 for name in train_dataset.CLASS_LIST},
+            "val_matsynth_loss": 0.0,
+            "val_skyrim_loss": 0.0,
+            "val_skyrim_confidence": 0.0,
+            "per_class_loss": {name: 0.0 for name in matsynth_train_dataset.CLASS_LIST},
+            "IoU": {name: 0.0 for name in matsynth_train_dataset.CLASS_LIST},
             "mIoU": 0.0,
         }
 
         train_loss_sum = 0.0
+        matsynth_loss_sum = 0.0
+        skyrim_loss_sum = 0.0
         train_batch_count = 0
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS} - Training"):
-            input = batch["pixel_values"]
-            labels_gt = batch["labels"]
+        bar = tqdm(
+            range(STEPS_PER_EPOCH_TRAIN),
+            desc=f"Epoch {epoch + 1}/{EPOCHS} - Training",
+            unit="batch",
+        )
+
+        for _ in bar:
+            matsynth_batch = next(matsynth_train_iter)
+            skyrim_batch = next(skyrim_train_iter)
+
+            input = torch.cat(
+                [matsynth_batch["pixel_values"], skyrim_batch["pixel_values"]], dim=0
+            )
+            matsynth_labels_gt = matsynth_batch["labels"]
+
+            domain = torch.cat(
+                [
+                    torch.zeros(
+                        len(matsynth_batch["pixel_values"]),
+                        dtype=torch.bool,
+                        device=device,
+                    ),
+                    torch.ones(
+                        len(skyrim_batch["pixel_values"]),
+                        dtype=torch.bool,
+                        device=device,
+                    ),
+                ],
+                dim=0,
+            )  # False=MatSynth, True=Skyrim
 
             input = input.to(device, non_blocking=True)
-            labels_gt = labels_gt.to(device, non_blocking=True)
-
-            with autocast(device_type=device.type):
-                logits = model(input).logits
-
-            # upsample logits to match the input size
-            logits_up = torch.nn.functional.interpolate(
-                logits,
-                size=input.shape[2:],
-                mode="bilinear",
-                align_corners=False,
-            )
-            with autocast(device_type=device.type):
-                loss = seg_loss_fn(logits_up, labels_gt)
-
-            # Alternatively can skip batch but let's see how it goes
-            if torch.isnan(loss):
-                raise ValueError("Loss is NaN")
-
-            train_loss_sum += loss.item()
-            train_batch_count += 1
+            matsynth_labels_gt = matsynth_labels_gt.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-
-            # loss.backward()
-            # optimizer.step()
-
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
-
-        train_loss_avg = train_loss_sum / train_batch_count
-        epoch_data["train_loss"] = train_loss_avg
-
-        model.eval()
-        val_loss_sum = 0.0
-        val_batch_count = 0
-
-        # Per class cross-entropy loss
-        val_total_loss_per_class = torch.zeros(
-            len(train_dataset.CLASS_LIST), dtype=torch.float32, device="cuda"
-        )
-        val_total_pixels_per_class = torch.zeros(
-            len(train_dataset.CLASS_LIST), dtype=torch.float32, device="cuda"
-        )
-
-        with torch.no_grad():
-            for batch in tqdm(
-                validation_loader, desc=f"Epoch {epoch + 1}/{EPOCHS} - Validation"
-            ):
-                input = batch["pixel_values"]
-                labels_gt = batch["labels"]
-                input = input.to(device, non_blocking=True)
-                labels_gt = labels_gt.to(device, non_blocking=True)
-
-                with autocast(device_type=device.type):
-                    logits = model(input).logits
+            with autocast(device_type=device.type):
+                logits: torch.Tensor = model(pixel_values=input).logits
 
                 # upsample logits to match the input size
-                logits_up = torch.nn.functional.interpolate(
+                logits_up: torch.Tensor = torch.nn.functional.interpolate(
                     logits,
                     size=input.shape[2:],
                     mode="bilinear",
                     align_corners=False,
                 )
-                with autocast(device_type=device.type):
-                    loss = seg_loss_fn(logits_up, labels_gt)
+                matsynth_logits = logits_up[~domain]  # MatSynth logits
+                skyrim_logits = logits_up[domain]
 
-                if torch.isnan(loss):
+                matsynth_loss = matsynth_seg_loss_fn(
+                    matsynth_logits, matsynth_labels_gt
+                )
+
+                if torch.isnan(matsynth_loss):
                     raise ValueError("Loss is NaN")
 
-                val_loss_sum += loss.item()
-                val_batch_count += 1
+                skyrim_confidence, skyrim_pred_labels = skyrim_logits.softmax(
+                    dim=1
+                ).max(dim=1)
+                # build a mask of high-confidence pixels
+                skyrim_mask = skyrim_confidence >= 0.8
+                if skyrim_mask.any():
+
+                    # for the masked CE, we still need “labels”—
+                    # use the network’s own argmax predictions where conf >= 0.8
+                    skyrim_labels = skyrim_pred_labels[skyrim_mask]
+
+                    # pick only those pixels
+                    skyrim_logits_flat = skyrim_logits.permute(0, 2, 3, 1)[
+                        skyrim_mask
+                    ]  # (N_masked, C)
+
+                    skyrim_loss = skyrim_seg_loss_fn(skyrim_logits_flat, skyrim_labels)
+                    if torch.isnan(skyrim_loss):
+                        raise ValueError("Skyrim loss is NaN")
+                else:
+                    skyrim_loss = torch.tensor(0.0, device=device)
+
+                total_loss = matsynth_loss + 0.2 * skyrim_loss
+
+            matsynth_loss_sum += matsynth_loss.item()
+            skyrim_loss_sum += skyrim_loss.item()
+
+            train_loss_sum += total_loss.item()
+            train_batch_count += 1
+
+            # loss.backward()
+            # optimizer.step()
+
+            scaler.scale(total_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            bar.update(1)
+
+        bar.close()
+
+        matsynth_train_loss_avg = matsynth_loss_sum / train_batch_count
+        skyrim_train_loss_avg = skyrim_loss_sum / train_batch_count
+        train_loss_avg = train_loss_sum / train_batch_count
+        epoch_data["train_loss"] = train_loss_avg
+        epoch_data["train_matsynth_loss"] = matsynth_train_loss_avg
+        epoch_data["train_skyrim_loss"] = skyrim_train_loss_avg
+
+        model.eval()
+        val_loss_sum = 0.0
+        val_matsynth_loss_sum = 0.0
+        val_skyrim_loss_sum = 0.0
+        val_skyrim_confidence_sum = 0.0
+        val_batch_count = 0
+
+        # Per class cross-entropy loss
+        val_total_loss_per_class = torch.zeros(
+            len(matsynth_train_dataset.CLASS_LIST), dtype=torch.float32, device="cuda"
+        )
+        val_total_pixels_per_class = torch.zeros(
+            len(matsynth_train_dataset.CLASS_LIST), dtype=torch.float32, device="cuda"
+        )
+
+        with torch.no_grad():
+            bar = tqdm(
+                range(STEPS_PER_EPOCH_VALIDATION),
+                desc=f"Epoch {epoch + 1}/{EPOCHS} - Validation",
+                unit="batch",
+            )
+
+            for _ in bar:
+                matsynth_batch = next(matsynth_validation_iter)
+                skyrim_batch = next(skyrim_validation_iter)
+
+                input = torch.cat(
+                    [matsynth_batch["pixel_values"], skyrim_batch["pixel_values"]],
+                    dim=0,
+                )
+                matsynth_labels_gt = matsynth_batch["labels"]
+
+                domain = torch.cat(
+                    [
+                        torch.zeros(
+                            len(matsynth_batch["pixel_values"]),
+                            dtype=torch.bool,
+                            device=device,
+                        ),
+                        torch.ones(
+                            len(skyrim_batch["pixel_values"]),
+                            dtype=torch.bool,
+                            device=device,
+                        ),
+                    ],
+                    dim=0,
+                )  # False=MatSynth, True=Skyrim
+
+                input = input.to(device, non_blocking=True)
+                matsynth_labels_gt = matsynth_labels_gt.to(device, non_blocking=True)
 
                 with autocast(device_type=device.type):
-                    pixel_loss = seq_per_class_fn(logits_up, labels_gt)
+                    logits: torch.Tensor = model(pixel_values=input).logits
 
-                flat_loss = pixel_loss.view(-1)
-                flat_labels = labels_gt.view(-1)
+                    # upsample logits to match the input size
+                    logits_up: torch.Tensor = torch.nn.functional.interpolate(
+                        logits,
+                        size=input.shape[2:],
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    matsynth_logits = logits_up[~domain]  # MatSynth logits
+                    skyrim_logits = logits_up[domain]
 
-                for c in range(len(train_dataset.CLASS_LIST)):
-                    mask = flat_labels == c
-                    val_total_loss_per_class[c] += flat_loss[mask].sum()
-                    val_total_pixels_per_class[c] += mask.sum()
+                    matsynth_loss = matsynth_seg_loss_fn(
+                        matsynth_logits, matsynth_labels_gt
+                    )
 
-                labels_pred = logits_up.argmax(dim=1)
-                val_all_preds.append(labels_pred)
-                val_all_labels.append(labels_gt)
+                    if torch.isnan(matsynth_loss):
+                        raise ValueError("Loss is NaN")
+
+                    skyrim_confidence, skyrim_pred_labels = skyrim_logits.softmax(
+                        dim=1
+                    ).max(dim=1)
+                    # build a mask of high-confidence pixels
+                    skyrim_mask = skyrim_confidence >= 0.8
+
+                    if skyrim_mask.any():
+                        # % of pixels above 0.8
+                        skyrim_confident_pixels = skyrim_mask.float().mean().item()
+
+                        # for the masked CE, we still need “labels”—
+                        # use the network’s own argmax predictions where conf >= 0.8
+                        skyrim_labels = skyrim_pred_labels[skyrim_mask]
+
+                        # pick only those pixels
+                        skyrim_logits_flat = skyrim_logits.permute(0, 2, 3, 1)[
+                            skyrim_mask
+                        ]  # (N_masked, C)
+
+                        skyrim_loss = skyrim_seg_loss_fn(
+                            skyrim_logits_flat, skyrim_labels
+                        )
+                        if torch.isnan(skyrim_loss):
+                            raise ValueError("Skyrim loss is NaN")
+                    else:
+                        skyrim_loss = torch.tensor(0.0, device=device)
+                        skyrim_confident_pixels = 0.0
+
+                    total_loss = matsynth_loss + 0.2 * skyrim_loss
+
+                    pixel_loss = matsynth_seq_per_class_fn(
+                        matsynth_logits, matsynth_labels_gt
+                    )
+
+                    flat_loss = pixel_loss.view(-1)
+                    flat_labels = matsynth_labels_gt.view(-1)
+
+                    for c in range(len(matsynth_train_dataset.CLASS_LIST)):
+                        mask = flat_labels == c
+                        val_total_loss_per_class[c] += flat_loss[mask].sum().float()
+                        val_total_pixels_per_class[c] += mask.sum().float()
+
+                    labels_pred = matsynth_logits.argmax(dim=1)
+                    val_all_preds.append(labels_pred)
+                    val_all_labels.append(matsynth_labels_gt)
+
+                val_skyrim_loss_sum += skyrim_loss.item()
+                val_skyrim_confidence_sum += skyrim_confident_pixels
+                val_matsynth_loss_sum += matsynth_loss.item()
+                val_loss_sum += total_loss.item()
+                val_batch_count += 1
+
+                bar.update(1)
 
         val_loss_avg = val_loss_sum / val_batch_count
+        val_matsynth_loss_avg = val_matsynth_loss_sum / val_batch_count
+        val_skyrim_loss_avg = val_skyrim_loss_sum / val_batch_count
+        val_skyrim_confidence_avg = val_skyrim_confidence_sum / val_batch_count
         epoch_data["val_loss"] = val_loss_avg
+        epoch_data["val_matsynth_loss"] = val_matsynth_loss_avg
+        epoch_data["val_skyrim_loss"] = val_skyrim_loss_avg
+        epoch_data["val_skyrim_confidence"] = val_skyrim_confidence_avg
 
-        # Calculate IoU
+        # Calculate IoU (MatSynth)
         val_all_preds = torch.cat(val_all_preds, dim=0)
         val_all_labels = torch.cat(val_all_labels, dim=0)
 
         jaccard_index = FM.jaccard_index(
             val_all_preds,
             val_all_labels,
-            num_classes=len(train_dataset.CLASS_LIST),
+            num_classes=len(matsynth_train_dataset.CLASS_LIST),
             ignore_index=255,  # Ignore the background class
             task="multiclass",
             average="none",  # Calculate IoU for each class separately
         )
-        for idx, name in enumerate(train_dataset.CLASS_LIST):
+        for idx, name in enumerate(matsynth_train_dataset.CLASS_LIST):
             epoch_data["IoU"][name] = jaccard_index[idx].item()
 
         epoch_data["mIoU"] = jaccard_index.mean().item()
@@ -496,8 +849,10 @@ def do_train():
         val_avg_loss_per_class = val_total_loss_per_class / (
             val_total_pixels_per_class + 1e-6
         )
-        for idx, name in enumerate(train_dataset.CLASS_LIST):
+        for idx, name in enumerate(matsynth_train_dataset.CLASS_LIST):
             epoch_data["per_class_loss"][name] = val_avg_loss_per_class[idx].item()
+
+        scheduler.step()
 
         print(json.dumps(epoch_data, indent=4))
 
@@ -517,7 +872,7 @@ def do_train():
         with open(output_dir / f"epoch_{epoch + 1}_stats.json", "w") as f:
             json.dump(epoch_data, f, indent=4)
 
-        if val_loss_avg < best_val_loss - patience_min_delta:
+        if val_loss_avg < best_val_loss:
             best_val_loss = val_loss_avg
             no_improvement_count = 0
 

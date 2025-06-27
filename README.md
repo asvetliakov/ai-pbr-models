@@ -15,14 +15,14 @@ Class weights = `1 / √freq(class)`; WeightedRandomSampler active in every phas
 
 ## 1. SegFormer (S)
 
-| Phase  | Dataset mix         | Trainables        | Crop / Res | Augment†                                         | Epochs | Opt & LR        | Scheduler      | Loss                               |
-| ------ | ------------------- | ----------------- | ---------- | ------------------------------------------------ | ------ | --------------- | -------------- | ---------------------------------- |
-| **S0** | 100 % MatSynth      | enc + dec         | 256²       | none                                             | 10     | AdamW 1e-4      | cosine-10      | CE                                 |
-| **S1** | 100 % MatSynth      | enc + dec         | 256²       | flips · rot · colour · **composite (30 %/15 %)** | 45     | AdamW 5e-5→1e-5 | OneCycle       | CE (+√freq)                        |
-| **S2** | 75 % Mat + 25 % Sky | heads + LoRA      | 256→512    | S1 + SkyPhotometric 0.6                          | 10     | AdamW 1e-5      | Step 6×0.5     | CE + masked-CE (Sky softmax > 0.8) |
-| **S3** | 50 % / 50 %         | top-½ enc + heads | 512→768    | composite 20 %/10 %                              | 10     | AdamW 5e-6      | cosine-12      | same                               |
-| **S4** | 50 % / 50 %         | **BN/LN only**    | full 1 K   | none                                             | 2      | AdamW 3e-6      | cosine-restart | CE                                 |
-| **S5** | 100 % Sky           | dec-head          | full 2 K   | SkyPhoto 0.5                                     | 6      | AdamW 1e-6      | Step 4×0.5     | CE                                 |
+| Phase  | Dataset mix         | Trainables        | Crop / Res | Augment†                                         | Epochs | Opt & LR        | Scheduler           | Loss                               |
+| ------ | ------------------- | ----------------- | ---------- | ------------------------------------------------ | ------ | --------------- | ------------------- | ---------------------------------- |
+| **S0** | 100 % MatSynth      | enc + dec         | 256²       | none                                             | 10     | AdamW 1e-4      | cosine-10           | CE                                 |
+| **S1** | 100 % MatSynth      | enc + dec         | 256²       | flips · rot · colour · **composite (30 %/15 %)** | 45     | AdamW 5e-5→1e-5 | OneCycle            | CE (+√freq)                        |
+| **S2** | 75 % Mat + 25 % Sky | heads + LoRA      | 256→512    | S1 + SkyPhotometric 0.6                          | 10     | AdamW 1e-5      | cosine-10, eta=2e-6 | CE + masked-CE (Sky softmax > 0.8) |
+| **S3** | 50 % / 50 %         | top-½ enc + heads | 512→768    | composite 20 %/10 %                              | 10     | AdamW 5e-6      | cosine-12           | same                               |
+| **S4** | 50 % / 50 %         | **BN/LN only**    | full 1 K   | none                                             | 2      | AdamW 3e-6      | cosine-restart      | CE                                 |
+| **S5** | 100 % Sky           | dec-head          | full 2 K   | SkyPhoto 0.5                                     | 6      | AdamW 1e-6      | Step 4×0.5          | CE                                 |
 
 ---
 

@@ -1,3 +1,5 @@
+import seed
+
 """
 Plug‑and‑play torchvision-style transforms that implement:
 1. AO tint      (approximate: darken by inverted Gaussian-blurred luminance)
