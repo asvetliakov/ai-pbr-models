@@ -161,6 +161,7 @@ model = create_segformer(
 )
 
 resume_training = args.resume
+
 if (args.load_checkpoint is not None) and Path(args.load_checkpoint).resolve().exists():
     load_checkpoint_path = Path(args.load_checkpoint).resolve()
     print(
@@ -170,36 +171,12 @@ if (args.load_checkpoint is not None) and Path(args.load_checkpoint).resolve().e
 
 if best_model_checkpoint is not None:
     print("Loading model state from checkpoint.")
-    model.load_state_dict(
-        best_model_checkpoint["model_state_dict"],
+    model.base_model.load_state_dict(
+        best_model_checkpoint["base_model_state_dict"],
     )
-
-
-# LoRA
-lora_config = LoraConfig(
-    r=8,  # Rank of the LoRA layers # type: ignore
-    lora_alpha=16,  # Scaling factor for the LoRA layers # type: ignore
-    target_modules=[  # type: ignore
-        "attention.self.query",
-        "attention.self.value",
-    ],  # Target modules to apply LoRA to
-    lora_dropout=0.05,  # Dropout rate for the LoRA layers # type: ignore
-    bias="none",  # No bias in LoRA layers # type: ignore
-    task_type=TaskType.FEATURE_EXTRACTION,  # type: ignore
-)
-model = get_peft_model(model, lora_config).to(device)
-
-
-def segformer_peft_forward(self, *args, **kwargs):
-    # 1) If PEFT passes input_ids=…, treat it as pixel_values.
-    if "input_ids" in kwargs and "pixel_values" not in kwargs:
-        kwargs["pixel_values"] = kwargs.pop("input_ids")
-    # 2) Call the original PEFT forward
-    return super(type(self), self).forward(*args, **kwargs)  # type: ignore
-
-
-# attach the shim
-model.forward = MethodType(segformer_peft_forward, model)
+    model.load_state_dict(
+        best_model_checkpoint["lora_state_dict"],
+    )
 
 # Freeze everything except the LoRA layers and decode head
 for p in model.parameters():
@@ -871,7 +848,9 @@ def do_train():
         torch.save(
             {
                 "epoch": epoch + 1,
-                "model_state_dict": model.state_dict(),
+                # "model_state_dict": model.state_dict(),
+                "base_model_state_dict": model.base_model.state_dict(),
+                "lora_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "scaler_state_dict": scaler.state_dict(),
@@ -890,7 +869,9 @@ def do_train():
             torch.save(
                 {
                     "epoch": epoch + 1,
-                    "model_state_dict": model.state_dict(),
+                    # "model_state_dict": model.state_dict(),
+                    "base_model_state_dict": model.base_model.state_dict(),
+                    "lora_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "scaler_state_dict": scaler.state_dict(),

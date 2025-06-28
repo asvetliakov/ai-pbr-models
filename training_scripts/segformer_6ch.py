@@ -1,11 +1,11 @@
 import torch
 from transformers import SegformerForSemanticSegmentation
 from transformers.utils import logging
+from peft import LoraConfig, get_peft_model, TaskType, PeftModel
+from types import MethodType
 
 
-def create_segformer(
-    num_labels: int, device: torch.device
-) -> SegformerForSemanticSegmentation:
+def create_segformer(num_labels: int, device: torch.device) -> PeftModel:
     logging.set_verbosity_error()  # Suppress warnings from transformers
     model = SegformerForSemanticSegmentation.from_pretrained(
         "nvidia/segformer-b2-finetuned-ade-512-512",
@@ -45,4 +45,28 @@ def create_segformer(
     # 6) Update config so future code knows to expect 6 channels
     model.config.num_channels = 6
 
-    return model
+    # LoRA added in S2
+    lora_config = LoraConfig(
+        r=8,  # Rank of the LoRA layers # type: ignore
+        lora_alpha=16,  # Scaling factor for the LoRA layers # type: ignore
+        target_modules=[  # type: ignore
+            "attention.self.query",
+            "attention.self.value",
+        ],  # Target modules to apply LoRA to
+        lora_dropout=0.05,  # Dropout rate for the LoRA layers # type: ignore
+        bias="none",  # No bias in LoRA layers # type: ignore
+        task_type=TaskType.FEATURE_EXTRACTION,  # type: ignore
+    )
+    model = get_peft_model(model, lora_config).to(device)
+
+    def segformer_peft_forward(self, *args, **kwargs):
+        # 1) If PEFT passes input_ids=…, treat it as pixel_values.
+        if "input_ids" in kwargs and "pixel_values" not in kwargs:
+            kwargs["pixel_values"] = kwargs.pop("input_ids")
+        # 2) Call the original PEFT forward
+        return super(type(self), self).forward(*args, **kwargs)  # type: ignore
+
+    # attach the shim
+    model.forward = MethodType(segformer_peft_forward, model)
+
+    return model  # type: ignore
