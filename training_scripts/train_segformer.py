@@ -207,9 +207,9 @@ for name, module in model.named_modules():
 #         p.requires_grad = True
 
 
-for n, p in model.named_parameters():
-    if p.requires_grad:
-        print(f"parameter: {n}")
+# for n, p in model.named_parameters():
+#     if p.requires_grad:
+#         print(f"parameter: {n}")
 
 
 def get_transform_train_matsynth(
