@@ -77,7 +77,7 @@ from torch.amp.autocast_mode import autocast
 # HYPER_PARAMETERS
 BATCH_SIZE = 4  # Batch size for training
 EPOCHS = 10  # Number of epochs to train
-LR = 1e-5  # Learning rate for the optimizer
+LR = 5e-6  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
 # PHASE = "a"  # Phase of the training per plan, used for logging and saving
@@ -143,14 +143,18 @@ skyrim_validation_dataset.all_validation_samples = (
     skyrim_train_dataset.all_validation_samples
 )
 
-BATCH_SIZE_MATSYNTH = int(BATCH_SIZE * 0.75)  # 75% Matsynth
-BATCH_SIZE_SKYRIM = int(BATCH_SIZE * 0.25)  # 25% Skyrim
+BATCH_SIZE_MATSYNTH = int(BATCH_SIZE * 0.5)  # 50% Matsynth
+BATCH_SIZE_SKYRIM = int(BATCH_SIZE * 0.5)  # 50% Skyrim
 
 # MAX_SAMPLES = max(len(matsynth_train_dataset), len(skyrim_train_dataset))
-STEPS_PER_EPOCH_TRAIN = math.ceil(len(matsynth_train_dataset) / BATCH_SIZE_MATSYNTH)
-STEPS_PER_EPOCH_VALIDATION = math.ceil(
-    len(matsynth_validation_dataset) / BATCH_SIZE_MATSYNTH
-)
+MIN_SAMPLES_TRAIN = min(
+    len(matsynth_train_dataset), len(skyrim_train_dataset)
+)  # Use the smaller dataset size for balanced training
+MIN_SAMPLES_VALIDATION = min(
+    len(matsynth_validation_dataset), len(skyrim_validation_dataset)
+)  # Use the smaller dataset size for balanced validation
+STEPS_PER_EPOCH_TRAIN = math.ceil(MIN_SAMPLES_TRAIN / BATCH_SIZE_MATSYNTH)
+STEPS_PER_EPOCH_VALIDATION = math.ceil(MIN_SAMPLES_VALIDATION / BATCH_SIZE_MATSYNTH)
 
 
 model = create_segformer(
@@ -182,9 +186,20 @@ if best_model_checkpoint is not None:
 for p in model.parameters():
     p.requires_grad = False
 
-for n, p in model.named_parameters():
-    if "lora_" in n or "decode_head" in n:
+# Unfreeze decode head
+for p in model.base_model.model.decode_head.parameters():  # type: ignore
+    p.requires_grad = True
+
+# Unfreeze TOP 1/2 of the encoder blocks (+ their LoRA)
+enc_blocks = model.base_model.model.segformer.encoder.block  # type: ignore # nn.ModuleList
+start_idx = len(enc_blocks) // 2  # type: ignore # halfway index
+for blk in enc_blocks[start_idx:]:  # type: ignore
+    for p in blk.parameters():  # type: ignore
         p.requires_grad = True
+
+# for n, p in model.named_parameters():
+#     if p.requires_grad:
+#         print(f"parameter: {n}")
 
 
 def get_transform_train_matsynth(
@@ -195,7 +210,7 @@ def get_transform_train_matsynth(
 ) -> Callable:
     def transform_train_fn(example):
         # name = example["name"]
-        current_crop_size = get_crop_size(current_epoch, EPOCHS, 256, 512)
+        current_crop_size = get_crop_size(current_epoch, EPOCHS, 512, 768)
 
         # Upper left corner tuple for each cro
         positions = [(0, 0)]
@@ -206,22 +221,24 @@ def get_transform_train_matsynth(
         samples = [example]
 
         if composites:
-            # 15% chance of 4 random crops
-            if random.random() < 0.15:
+            # 10% chance of 4 random crops
+            if random.random() < 0.1:
                 positions = [(0, 0), (512, 0), (0, 512), (512, 512)]
                 tile_size = [512, 512]
-                crop_size = (256, 256)
+                # crop_size = (256, 256)
+                crop_size = (current_crop_size, current_crop_size)
                 samples = [
                     example,
                     matsynth_train_dataset.get_random_sample(),
                     matsynth_train_dataset.get_random_sample(),
                     matsynth_train_dataset.get_random_sample(),
                 ]
-            # 30% chance of 2 random crops
-            elif random.random() < 0.3:
+            # 20% chance of 2 random crops
+            elif random.random() < 0.2:
                 positions = [(0, 0), (512, 0)]
                 tile_size = [1024, 512]
-                crop_size = (512, 256)
+                # crop_size = (512, 256)
+                crop_size = (current_crop_size * 2, current_crop_size)
                 samples = [
                     example,
                     matsynth_train_dataset.get_random_sample(),
@@ -314,7 +331,7 @@ def get_transform_train_skyrim(
 ) -> Callable:
     def transform_train_fn(example):
         # name = example["name"]
-        current_crop_size = get_crop_size(current_epoch, EPOCHS, 256, 512)
+        current_crop_size = get_crop_size(current_epoch, EPOCHS, 512, 768)
 
         image = example["basecolor"] if example["pbr"] else example["diffuse"]
         normal = example["normal"]
@@ -357,7 +374,7 @@ def get_transform_val_matsynth(current_epoch: int) -> Callable:
         normal = example["normal"]
         category = example["category"]
 
-        crop_size = get_crop_size(current_epoch, EPOCHS, 256, 512)
+        crop_size = get_crop_size(current_epoch, EPOCHS, 512, 768)
 
         albedo = center_crop(
             albedo, (crop_size, crop_size), [1024, 1024], TF.InterpolationMode.LANCZOS
@@ -399,7 +416,7 @@ def get_transform_val_skyrim(current_epoch: int) -> Callable:
         image = example["basecolor"] if example["pbr"] else example["diffuse"]
         normal = example["normal"]
 
-        crop_size = get_crop_size(current_epoch, EPOCHS, 256, 512)
+        crop_size = get_crop_size(current_epoch, EPOCHS, 512, 768)
 
         final_image = center_crop(
             image, (crop_size, crop_size), [1024, 1024], TF.InterpolationMode.LANCZOS
@@ -441,7 +458,7 @@ def cycle(dl: DataLoader):
 # Training loop
 def do_train():
     print(
-        f"Starting training for {EPOCHS} epochs, on {len(matsynth_train_dataset)} MatSynth samples and {int(len(matsynth_train_dataset) * 0.25)} Skyrim samples, validation on {len(matsynth_validation_dataset)} MatSynth samples and {int(len(matsynth_validation_dataset) * 0.25)} Skyrim samples."
+        f"Starting training for {EPOCHS} epochs, on {MIN_SAMPLES_TRAIN} MatSynth samples and {MIN_SAMPLES_TRAIN} Skyrim samples, validation on {MIN_SAMPLES_VALIDATION} MatSynth samples and {MIN_SAMPLES_VALIDATION} Skyrim samples."
     )
 
     matsynth_train_loader = DataLoader(
@@ -486,7 +503,7 @@ def do_train():
         optimizer.load_state_dict(best_model_checkpoint["optimizer_state_dict"])
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=2e-6
+        optimizer, T_max=12, eta_min=1e-7
     )
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(
     #     optimizer,
