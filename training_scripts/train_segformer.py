@@ -77,7 +77,7 @@ from torch.amp.autocast_mode import autocast
 # HYPER_PARAMETERS
 BATCH_SIZE = 4  # Batch size for training
 EPOCHS = 10  # Number of epochs to train
-LR = 5e-6  # Learning rate for the optimizer
+LR = 2.5e-6  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
 # PHASE = "a"  # Phase of the training per plan, used for logging and saving
@@ -494,6 +494,25 @@ def do_train():
     matsynth_validation_iter = cycle(matsynth_validation_loader)
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
+    # head_params, enc_params, lora_params = [], [], []
+    # for name, p in model.named_parameters():
+    #     if not p.requires_grad:
+    #         continue
+    #     if ".decode_head." in name:
+    #         head_params.append(p)
+    #     elif "lora_" in name:
+    #         lora_params.append(p)
+    #     else:
+    #         # top-half encoder (its base weights)
+    #         enc_params.append(p)
+
+    # # Give LoRA layers higher learning rate and no weight decay
+    # param_groups = [
+    #     {"params": head_params, "lr": LR, "weight_decay": WD},
+    #     {"params": enc_params, "lr": LR, "weight_decay": WD},
+    #     {"params": lora_params, "lr": 1e-5, "weight_decay": 0.0},
+    # ]
+
     trainable = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
         trainable, lr=LR, weight_decay=WD, betas=(0.9, 0.999), eps=1e-8
@@ -503,7 +522,7 @@ def do_train():
         optimizer.load_state_dict(best_model_checkpoint["optimizer_state_dict"])
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=12, eta_min=1e-7
+        optimizer, T_max=6, eta_min=1e-7
     )
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(
     #     optimizer,
