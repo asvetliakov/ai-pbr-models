@@ -22,12 +22,13 @@ def get_crop_size(epoch: int, total_epochs: int, min_size: int, max_size: int):
 def center_crop(
     image: Image.Image,
     size: tuple[int, int],
-    resize_to: list[int],
+    resize_to: Optional[list[int]],
     interpolation: TF.InterpolationMode,
 ) -> Image.Image:
     crop = TF.center_crop(image, size)  # type: ignore
-    resized = TF.resize(crop, resize_to, interpolation=interpolation)  # type: ignore
-    return resized  # type: ignore
+    if resize_to is not None:
+        crop = TF.resize(crop, resize_to, interpolation=interpolation)  # type: ignore
+    return crop  # type: ignore
 
 
 def get_random_crop(

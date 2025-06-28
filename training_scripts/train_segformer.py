@@ -76,9 +76,10 @@ from torch.amp.autocast_mode import autocast
 
 # HYPER_PARAMETERS
 BATCH_SIZE = 4  # Batch size for training
-EPOCHS = 10  # Number of epochs to train
-LR = 2.5e-6  # Learning rate for the optimizer
-WD = 1e-2  # Weight decay for the optimizer
+EPOCHS = 2  # Number of epochs to train
+LR = 3e-6  # Learning rate for the optimizer
+# WD = 1e-2  # Weight decay for the optimizer
+WD = 0.0  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
 # PHASE = "a"  # Phase of the training per plan, used for logging and saving
 PHASE = args.phase  # Phase of the training per plan, used for logging and saving
@@ -186,20 +187,29 @@ if best_model_checkpoint is not None:
 for p in model.parameters():
     p.requires_grad = False
 
+# Phase S4, unfreeze all BatchNorm and LayerNorm layers only
+for name, module in model.named_modules():
+    if isinstance(module, (torch.nn.BatchNorm2d, torch.nn.LayerNorm)):
+        # both weight (gamma) and bias (beta) of each norm layer
+        module.weight.requires_grad = True
+        module.bias.requires_grad = True
+
+# Phase S3
 # Unfreeze decode head
-for p in model.base_model.model.decode_head.parameters():  # type: ignore
-    p.requires_grad = True
+# for p in model.base_model.model.decode_head.parameters():  # type: ignore
+#     p.requires_grad = True
 
 # Unfreeze TOP 1/2 of the encoder blocks (+ their LoRA)
-enc_blocks = model.base_model.model.segformer.encoder.block  # type: ignore # nn.ModuleList
-start_idx = len(enc_blocks) // 2  # type: ignore # halfway index
-for blk in enc_blocks[start_idx:]:  # type: ignore
-    for p in blk.parameters():  # type: ignore
-        p.requires_grad = True
+# enc_blocks = model.base_model.model.segformer.encoder.block  # type: ignore # nn.ModuleList
+# start_idx = len(enc_blocks) // 2  # type: ignore # halfway index
+# for blk in enc_blocks[start_idx:]:  # type: ignore
+#     for p in blk.parameters():  # type: ignore
+#         p.requires_grad = True
 
-# for n, p in model.named_parameters():
-#     if p.requires_grad:
-#         print(f"parameter: {n}")
+
+for n, p in model.named_parameters():
+    if p.requires_grad:
+        print(f"parameter: {n}")
 
 
 def get_transform_train_matsynth(
@@ -210,7 +220,8 @@ def get_transform_train_matsynth(
 ) -> Callable:
     def transform_train_fn(example):
         # name = example["name"]
-        current_crop_size = get_crop_size(current_epoch, EPOCHS, 512, 768)
+        # current_crop_size = get_crop_size(current_epoch, EPOCHS, 512, 768)
+        current_crop_size = 1024
 
         # Upper left corner tuple for each cro
         positions = [(0, 0)]
@@ -265,13 +276,13 @@ def get_transform_train_matsynth(
             if color_augmentations:
                 albedo = selective_aug(albedo, category=category_name)
 
-            albedo = TF.resize(
-                albedo, tile_size, interpolation=TF.InterpolationMode.LANCZOS  # type: ignore
-            )
-            normal = TF.resize(
-                normal, tile_size, interpolation=TF.InterpolationMode.BILINEAR  # type: ignore
-            )
-            normal = normalize_normal_map(normal)  # type: ignore
+            # albedo = TF.resize(
+            #     albedo, tile_size, interpolation=TF.InterpolationMode.LANCZOS  # type: ignore
+            # )
+            # normal = TF.resize(
+            #     normal, tile_size, interpolation=TF.InterpolationMode.BILINEAR  # type: ignore
+            # )
+            # normal = normalize_normal_map(normal)  # type: ignore
 
             final_albedo.paste(albedo, box=pos)  # type: ignore
             final_normal.paste(normal, box=pos)  # type: ignore
@@ -331,7 +342,8 @@ def get_transform_train_skyrim(
 ) -> Callable:
     def transform_train_fn(example):
         # name = example["name"]
-        current_crop_size = get_crop_size(current_epoch, EPOCHS, 512, 768)
+        # current_crop_size = get_crop_size(current_epoch, EPOCHS, 512, 768)
+        current_crop_size = 1024
 
         image = example["basecolor"] if example["pbr"] else example["diffuse"]
         normal = example["normal"]
@@ -341,7 +353,8 @@ def get_transform_train_skyrim(
             normal,
             size=(current_crop_size, current_crop_size),
             augmentations=safe_augmentations,
-            resize_to=[1024, 1024],
+            # resize_to=[1024, 1024],
+            resize_to=None,
         )
         if photometric > 0.0:
             skyrim_photometric = SkyrimPhotometric(p_aug=photometric)
@@ -374,23 +387,34 @@ def get_transform_val_matsynth(current_epoch: int) -> Callable:
         normal = example["normal"]
         category = example["category"]
 
-        crop_size = get_crop_size(current_epoch, EPOCHS, 512, 768)
+        # crop_size = get_crop_size(current_epoch, EPOCHS, 512, 768)
+        crop_size = 1024
 
         albedo = center_crop(
-            albedo, (crop_size, crop_size), [1024, 1024], TF.InterpolationMode.LANCZOS
+            albedo,
+            (crop_size, crop_size),
+            # [1024, 1024],
+            None,
+            TF.InterpolationMode.LANCZOS,
         )
         albedo = TF.to_tensor(albedo)
         albedo = TF.normalize(
             albedo, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
         )
 
-        normal = normalize_normal_map(
-            center_crop(
-                normal,
-                (crop_size, crop_size),
-                [1024, 1024],
-                TF.InterpolationMode.BILINEAR,
-            )
+        # normal = normalize_normal_map(
+        #     center_crop(
+        #         normal,
+        #         (crop_size, crop_size),
+        #         [1024, 1024],
+        #         TF.InterpolationMode.BILINEAR,
+        #     )
+        # )
+        normal = center_crop(
+            normal,
+            (crop_size, crop_size),
+            None,
+            TF.InterpolationMode.BILINEAR,
         )
         normal = TF.to_tensor(normal)
         normal = TF.normalize(
@@ -416,23 +440,34 @@ def get_transform_val_skyrim(current_epoch: int) -> Callable:
         image = example["basecolor"] if example["pbr"] else example["diffuse"]
         normal = example["normal"]
 
-        crop_size = get_crop_size(current_epoch, EPOCHS, 512, 768)
+        # crop_size = get_crop_size(current_epoch, EPOCHS, 512, 768)
+        crop_size = 1024
 
         final_image = center_crop(
-            image, (crop_size, crop_size), [1024, 1024], TF.InterpolationMode.LANCZOS
+            image,
+            (crop_size, crop_size),
+            #   [1024, 1024],
+            None,
+            TF.InterpolationMode.LANCZOS,
         )
         final_image = TF.to_tensor(final_image)
         final_image = TF.normalize(
             final_image, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
         )
 
-        final_normal = normalize_normal_map(
-            center_crop(
-                normal,
-                (crop_size, crop_size),
-                [1024, 1024],
-                TF.InterpolationMode.BILINEAR,
-            )
+        # final_normal = normalize_normal_map(
+        #     center_crop(
+        #         normal,
+        #         (crop_size, crop_size),
+        #         [1024, 1024],
+        #         TF.InterpolationMode.BILINEAR,
+        #     )
+        # )
+        final_normal = center_crop(
+            normal,
+            (crop_size, crop_size),
+            None,
+            TF.InterpolationMode.BILINEAR,
         )
         final_normal = TF.to_tensor(final_normal)
         final_normal = TF.normalize(
@@ -521,8 +556,14 @@ def do_train():
         print("Loading optimizer state from checkpoint.")
         optimizer.load_state_dict(best_model_checkpoint["optimizer_state_dict"])
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=6, eta_min=1e-7
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #     optimizer, T_max=6, eta_min=1e-7
+    # )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=1,
+        T_mult=1,
+        eta_min=1e-7,  # Minimum learning rate
     )
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(
     #     optimizer,
@@ -566,17 +607,17 @@ def do_train():
                 epoch + 1,
                 # Composites & flips are enabled from epoch 1
                 safe_augmentations=True,
-                composites=True,
+                composites=False,
                 # Color augmentations are enabled after warm-up (from epoch 6)
                 # color_augmentations=(epoch + 1) > 5,
-                color_augmentations=True,
+                color_augmentations=False,
             )
         )
         matsynth_validation_dataset.set_transform(get_transform_val_matsynth(epoch + 1))
 
         skyrim_train_dataset.set_transform(
             get_transform_train_skyrim(
-                epoch + 1, safe_augmentations=True, photometric=0.6
+                epoch + 1, safe_augmentations=True, photometric=0.0
             )
         )
         skyrim_validation_dataset.set_transform(get_transform_val_skyrim(epoch + 1))
