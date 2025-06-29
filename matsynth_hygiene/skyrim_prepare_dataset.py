@@ -96,21 +96,25 @@ def screen_ao_from_uint8(
 
 
 def resize_texture(
-    path: Path, img: Image.Image, resampling: Image.Resampling, is_normal=False
+    target_size: int,
+    path: Path,
+    img: Image.Image,
+    resampling: Image.Resampling,
+    is_normal=False,
 ) -> Image.Image:
 
     min_size = min(img.size)
-    if min_size == 2048:
-        # Already at 2k resolution, no need to resize
+    if min_size == target_size:
+        # Already at target resolution, no need to resize
         return img
 
-    factor = 2048 / min_size
+    factor = target_size / min_size
 
     width, height = img.size
     final_width = math.ceil(width * factor)
     final_height = math.ceil(height * factor)
 
-    # print(f"Resizing {path} from {width}x{height} to {final_width}x{final_height}")
+    print(f"Resizing {path} from {width}x{height} to {final_width}x{final_height}")
     img = img.resize((final_width, final_height), resample=resampling)
     if is_normal:
         img = normalize_normal_map(img)
@@ -172,11 +176,25 @@ def process_non_pbr(path: Path):
         normal_png.unlink()
         return
 
-    diffuse_img = resize_texture(diffuse_png, diffuse_img, Image.Resampling.LANCZOS)
-
     normal_img = Image.open(normal_png).convert("RGB")
+    normal_min_size = min(normal_img.size)
+    if normal_min_size < 1024:
+        print(
+            f"Normal resolution is too low for {normal_png}: {normal_img.size}, dropping."
+        )
+        diffuse_png.unlink()
+        normal_png.unlink()
+        return
+
+    min_size = min(diffuse_min_size, normal_min_size)
+    if min_size > 2048:
+        min_size = 2048
+
+    diffuse_img = resize_texture(
+        min_size, diffuse_png, diffuse_img, Image.Resampling.LANCZOS
+    )
     normal_img = resize_texture(
-        normal_png, normal_img, Image.Resampling.BILINEAR, is_normal=True
+        min_size, normal_png, normal_img, Image.Resampling.BILINEAR, is_normal=True
     )
 
     diffuse_img.save(diffuse_png, format="PNG")
@@ -224,21 +242,6 @@ def process_pbr(rmaos_path: Path):
     ]
     run(albedo_args, check=True, stdout=DEVNULL)
     albedo_png = albedo_texture.with_suffix(".png")
-    albedo_img = Image.open(albedo_png).convert("RGB")
-    min_albedo_size = min(albedo_img.size)
-    if min_albedo_size < 1024:
-        print(
-            f"Albedo resolution is too low for {albedo_png}: {albedo_img.size}, dropping."
-        )
-        albedo_png.unlink()
-        return
-
-    albedo_img = resize_texture(albedo_png, albedo_img, Image.Resampling.LANCZOS)
-    albedo_img.save(albedo_png, format="PNG")
-    albedo_dst = output_dir / (base_name + "_basecolor.png")
-    if albedo_dst.exists():
-        albedo_dst.unlink()  # Remove existing file if it exists
-    albedo_png = albedo_png.rename(albedo_dst)
 
     # Call texconv for the normal texture
     normal_args = TEXCONV_ARGS_LINEAR + [
@@ -248,15 +251,18 @@ def process_pbr(rmaos_path: Path):
     ]
     run(normal_args, check=True, stdout=DEVNULL)
     normal_png = normal_texture.with_suffix(".png")
+
+    albedo_img = Image.open(albedo_png).convert("RGB")
     normal_img = Image.open(normal_png).convert("RGB")
-    normal_img = resize_texture(
-        normal_png, normal_img, Image.Resampling.BILINEAR, is_normal=True
-    )
-    normal_img.save(normal_png, format="PNG")
-    normal_dst = output_dir / (base_name + "_normal.png")
-    if normal_dst.exists():
-        normal_dst.unlink()  # Remove existing file if it exists
-    normal_png = normal_png.rename(normal_dst)
+    min_albedo_size = min(albedo_img.size)
+    min_normal_size = min(normal_img.size)
+    if min_albedo_size < 1024 or min_normal_size < 1024:
+        print(
+            f"Albedo or normal resolution is too low for {albedo_png}: albedo size: {albedo_img.size}, normal size: {normal_img.size}, dropping."
+        )
+        albedo_png.unlink()
+        normal_png.unlink()
+        return
 
     # Call texconv for rmaos texture
     rmaos_args = TEXCONV_ARGS_LINEAR + [
@@ -267,7 +273,37 @@ def process_pbr(rmaos_path: Path):
     run(rmaos_args, check=True, stdout=DEVNULL)
     rmaos_png = rmaos_texture.with_suffix(".png")
     rmaos_img = Image.open(rmaos_png)
-    rmaos_img = resize_texture(rmaos_png, rmaos_img, Image.Resampling.BILINEAR)
+    min_rmaos_size = min(rmaos_img.size)
+
+    min_size = min(min_albedo_size, min_normal_size, min_rmaos_size)
+    if min_size > 2048:
+        min_size = 2048
+
+    if min_size == 1024 and min_rmaos_size == 1024 and min_albedo_size > 2048:
+        # Better to upscale RMAOS to 2K rather than downscale albedo from 4K to 1K
+        min_size = 2048
+
+    albedo_img = resize_texture(
+        min_size, albedo_png, albedo_img, Image.Resampling.LANCZOS
+    )
+    albedo_img.save(albedo_png, format="PNG")
+    albedo_dst = output_dir / (base_name + "_basecolor.png")
+    if albedo_dst.exists():
+        albedo_dst.unlink()  # Remove existing file if it exists
+    albedo_png = albedo_png.rename(albedo_dst)
+
+    normal_img = resize_texture(
+        min_size, normal_png, normal_img, Image.Resampling.BILINEAR, is_normal=True
+    )
+    normal_img.save(normal_png, format="PNG")
+    normal_dst = output_dir / (base_name + "_normal.png")
+    if normal_dst.exists():
+        normal_dst.unlink()  # Remove existing file if it exists
+    normal_png = normal_png.rename(normal_dst)
+
+    rmaos_img = resize_texture(
+        min_size, rmaos_png, rmaos_img, Image.Resampling.BILINEAR
+    )
 
     rmaos_channels = rmaos_img.split()
 
@@ -314,7 +350,7 @@ def process_pbr(rmaos_path: Path):
         parallax_png = parallax_texture.with_suffix(".png")
         parallax_img = Image.open(parallax_png).convert("L")
         parallax_img = resize_texture(
-            parallax_png, parallax_img, Image.Resampling.BICUBIC
+            min_size, parallax_png, parallax_img, Image.Resampling.BICUBIC
         )
         parallax_img.save(parallax_png, format="PNG")
         parallax_dst = output_dir / (base_name + "_parallax.png")
