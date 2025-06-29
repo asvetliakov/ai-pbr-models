@@ -274,6 +274,8 @@ def process_pbr(rmaos_path: Path):
     rmaos_png = rmaos_texture.with_suffix(".png")
     rmaos_img = Image.open(rmaos_png)
     min_rmaos_size = min(rmaos_img.size)
+    if min_rmaos_size < 1024:
+        min_rmaos_size = 1024
 
     min_size = min(min_albedo_size, min_normal_size, min_rmaos_size)
     if min_size > 2048:
