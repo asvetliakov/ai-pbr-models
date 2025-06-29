@@ -42,6 +42,7 @@ def get_random_crop(
     ao: Optional[Image.Image] = None,
     resize_to: Optional[list[int]] = None,
     augmentations: Optional[bool] = True,
+    center_crop: Optional[bool] = False,
 ) -> tuple[
     Image.Image,
     Image.Image,
@@ -54,23 +55,40 @@ def get_random_crop(
     """
     Crop and resize two images to the same size.
     """
-    i, j, h, w = T.RandomCrop.get_params(albedo, output_size=size)  # type: ignore
+    if not center_crop:
+        i, j, h, w = T.RandomCrop.get_params(albedo, output_size=size)  # type: ignore
 
-    final_albedo = TF.crop(albedo, i, j, h, w)  # type: ignore
-    final_normal = TF.crop(normal, i, j, h, w)  # type: ignore
-    final_diffuse = (
-        TF.crop(diffuse, i, j, h, w) if diffuse is not None else None  # type: ignore
-    )
-    final_height = (
-        TF.crop(height, i, j, h, w) if height is not None else None  # type: ignore
-    )
-    final_metallic = (
-        TF.crop(metallic, i, j, h, w) if metallic is not None else None  # type: ignore
-    )
-    final_roughness = (
-        TF.crop(roughness, i, j, h, w) if roughness is not None else None  # type: ignore
-    )
-    final_ao = TF.crop(ao, i, j, h, w) if ao is not None else None  # type: ignore
+        final_albedo = TF.crop(albedo, i, j, h, w)  # type: ignore
+        final_normal = TF.crop(normal, i, j, h, w)  # type: ignore
+        final_diffuse = (
+            TF.crop(diffuse, i, j, h, w) if diffuse is not None else None  # type: ignore
+        )
+        final_height = (
+            TF.crop(height, i, j, h, w) if height is not None else None  # type: ignore
+        )
+        final_metallic = (
+            TF.crop(metallic, i, j, h, w) if metallic is not None else None  # type: ignore
+        )
+        final_roughness = (
+            TF.crop(roughness, i, j, h, w) if roughness is not None else None  # type: ignore
+        )
+        final_ao = TF.crop(ao, i, j, h, w) if ao is not None else None  # type: ignore
+    else:
+        final_albedo = TF.center_crop(albedo, size)  # type: ignore
+        final_normal = TF.center_crop(normal, size)  # type: ignore
+        final_diffuse = (
+            TF.center_crop(diffuse, size) if diffuse is not None else None  # type: ignore
+        )
+        final_height = (
+            TF.center_crop(height, size) if height is not None else None  # type: ignore
+        )
+        final_metallic = (
+            TF.center_crop(metallic, size) if metallic is not None else None  # type: ignore
+        )
+        final_roughness = (
+            TF.center_crop(roughness, size) if roughness is not None else None  # type: ignore
+        )
+        final_ao = TF.center_crop(ao, size) if ao is not None else None  # type: ignore
 
     if augmentations:
         if random.random() < 0.5:
@@ -367,7 +385,7 @@ def overlay_specular(
 #     )
 
 
-def selective_aug(image, category: str):
+def selective_aug(image, category: str) -> Image.Image:
     if category == "wood":
         if random.random() < 0.5:
             image = TF.adjust_brightness(
@@ -430,7 +448,7 @@ def selective_aug(image, category: str):
                 persistence=0.5,  # contrast of layers
                 lacunarity=2.0,  # frequency multiplier between octaves
             )
-    return image
+    return image  # type: ignore
 
 
 def make_full_image_mask(category_id: int, img_size: tuple[int, int]) -> torch.Tensor:
