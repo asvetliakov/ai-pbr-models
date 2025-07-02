@@ -8,43 +8,50 @@
 -   **A–phases** = UNet-Albedo (`UNetAlbedo` in code)
 -   **M–phases** = UNet-Maps (`UNetMaps`)
 
-`cond_ch = 256` ⇒ FiLM conditioning **enabled from the first epoch** for both U-Nets.  
+`cond_ch = 512` ⇒ FiLM conditioning **enabled from the first epoch** for both U-Nets.  
 Class weights = `1 / √freq(class)`; WeightedRandomSampler active in every phase except the final hi-res stages.
 
 ---
 
 ## 1. SegFormer (S)
 
-| Phase  | Dataset mix         | Trainables        | Crop / Res | Augment†                                         | Epochs | Opt & LR        | Scheduler           | Loss                               |
-| ------ | ------------------- | ----------------- | ---------- | ------------------------------------------------ | ------ | --------------- | ------------------- | ---------------------------------- |
-| **S0** | 100 % MatSynth      | enc + dec         | 256²       | none                                             | 10     | AdamW 1e-4      | cosine-10           | CE                                 |
-| **S1** | 100 % MatSynth      | enc + dec         | 256²       | flips · rot · colour · **composite (30 %/15 %)** | 45     | AdamW 5e-5→1e-5 | OneCycle            | CE (+√freq)                        |
-| **S2** | 75 % Mat + 25 % Sky | heads + LoRA      | 256→512    | S1 + SkyPhotometric 0.6                          | 10     | AdamW 1e-5      | cosine-10, eta=2e-6 | CE + masked-CE (Sky softmax > 0.8) |
-| **S3** | 50 % / 50 %         | top-½ enc + heads | 512→768    | composite 20 %/10 %                              | 10     | AdamW 5e-6      | cosine-12           | same                               |
-| **S4** | 50 % / 50 %         | **BN/LN only**    | full 1 K   | none                                             | 2      | AdamW 3e-6      | cosine-restart      | CE                                 |
-| **S5** | 100 % Sky           | dec-head          | full 2 K   | SkyPhoto 0.5                                     | 6      | AdamW 1e-6      | Step 4×0.5          | CE                                 |
+| Phase | Dataset mix         | Trainables        | **Crop / Feed** | Augment†                                                        | Epochs | Opt & LR        | Scheduler         | Loss                       |
+| ----- | ------------------- | ----------------- | --------------- | --------------------------------------------------------------- | ------ | --------------- | ----------------- | -------------------------- |
+| S1    | 100 % MatSynth      | enc + dec         | **256**         | none (first 10 ep) flips · rot · colour · composite (30 %/15 %) | 55     | AdamW 1e‑4→1e‑5 | OneCycle          | CE (+√freq)                |
+| S2    | 75 % Mat / 25 % Sky | heads + LoRA      | **512**         | S1 + SkyPhotometric 0.6 + composite (25 %/10 %)                 | 10     | AdamW 1e‑5      | cosine‑10, η=2e‑6 | CE + masked‑CE (Sky p>0.8) |
+| S3    | 50 % / 50 %         | top‑½ enc + heads | **768**         | SkyPhotometric 0.6                                              | 10     | AdamW 5e‑6      | cosine‑12         | same                       |
+| S4    | 50 % / 50 %         | **BN/LN only**    | **1024**        | none                                                            | 2      | AdamW 3e‑6      | cosine‑restart    | CE                         |
+| S5    | 50 % / 50 %         | dec‑head + LoRA   | **1024**        | SkyPhotometric 0.5                                              | 8      | AdamW 1e‑6      | cosine‑8          | CE                         |
 
 ---
 
-## 2. UNet-Albedo (A)
+## 2. UNet‑Albedo (A)
 
-| Phase          | Dataset mix          | Trainables           | Crop         | Augment†                           | Epochs | Opt & LR                                                                                                             | Scheduler                                                                   | Loss                       |
-| -------------- | -------------------- | -------------------- | ------------ | ---------------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | -------------------------- |
-| **A1**         | 50 % Mat / 50% % Sky | **full UNet + FiLM** | 256→512      | flips · rot · colour, SkyPhoto 0.6 | 35     | AdamW b1=0.9, b2=0.999, eps=1e-8, _per group LR_<br> _enc_: 2e-4<br> _dec_: 2e-4<br> _film_: 3e-4<br> _head_: 2.5e-4 | OneCycle, pct=0.2, anneal_strategy=cos,<br> finalLr=1e-5, (f_div_factor=20) | L1 + 0.1 SSIM + 0.05 LPIPS |
-| **A2**         | 25 % Mat / 75 % Sky  | decoder + FiLM       | 512→768      | A1 + SkyPhoto 0.6                  | 10     | AdamW 1e-5                                                                                                           | cosine-10                                                                   | same                       |
-| **A3-default** | 100 % Sky            | **1 × 1 head only**  | **full 2 K** | none                               | 3      | Adam 5e-7                                                                                                            | Exp 0.9                                                                     | same                       |
+|  Phase | Dataset mix         | Trainables          | **Crop / Feed (px)** | Augment†                           | Epochs | Optimiser & LR (per‑group)                            | Scheduler                           | Loss                       |
+| -----: | ------------------- | ------------------- | -------------------- | ---------------------------------- | -----: | ----------------------------------------------------- | ----------------------------------- | -------------------------- |
+| **A1** | 50 % Mat / 50 % Sky | full UNet + FiLM    | **256**              | flips · rot · colour, SkyPhoto 0.6 |     35 | AdamW — enc 2e‑4 · dec 2e‑4 · FiLM 3e‑4 · head 2.5e‑4 | OneCycle (pct 0.2, cos, final 1e‑5) | L1 + 0.1 SSIM + 0.05 LPIPS |
+| **A2** | 25 % Mat / 75 % Sky | decoder + FiLM      | **512**              | A1 aug + SkyPhoto 0.6              |     10 | AdamW 1e‑5                                            | cosine‑10                           | same                       |
+| **A3** | 100 % Sky           | **1 × 1 head only** | **1 024**            | none                               |      3 | Adam 5e‑7                                             | Exp 0.9                             | same                       |
 
-_Save **best A2 checkpoint** → encoder weight donor for Maps._
+_Save the **best A2** checkpoint → encoder donor for Maps._
 
 ---
 
-## 3. UNet-Maps (M) — stand-alone model
+## 3. UNet‑Maps (M)
 
-| Phase                       | Dataset   | **Encoder init**                                         | Trainables                                           | Res / Crop     | Epochs   | Opt & LR                                                  | Scheduler | Core losses                                                  |
-| --------------------------- | --------- | -------------------------------------------------------- | ---------------------------------------------------- | -------------- | -------- | --------------------------------------------------------- | --------- | ------------------------------------------------------------ |
-| **M-pre** _(cheap warm-up)_ | 100 % Sky | **copy `unet.*` weights from best A2**<br>`strict=False` | enc + dec + heads                                    | 768→1 K (rand) | 6        | AdamW:<br>• enc 2e-5 (LLRD 0.8^depth)<br>• dec/heads 1e-4 | cosine-6  | Rough L1 + .05 SSIM · Metal BCE • AO L1 · Height L1 + .01 TV |
-| **M0**                      | 100 % Sky | from M-pre                                               | enc + dec + heads                                    | full 1 K       | 8        | AdamW:<br>• enc 1e-5<br>• dec/heads 5e-5                  | cosine-8  | same                                                         |
-| **M1**                      | 100 % Sky | best M0                                                  | **one head at a time** (rough → metal → AO → height) | full 2 K       | 5–7 each | Adam 1e-6                                                 | Exp 0.9   | same (detach Albedo)                                         |
+|     Phase | Dataset   | Encoder init           | Trainables             | **Crop / Feed (px)** | Epochs | Optimiser & LR                                | Scheduler | Core losses                                                  |
+| --------: | --------- | ---------------------- | ---------------------- | -------------------- | -----: | --------------------------------------------- | --------- | ------------------------------------------------------------ |
+| **M‑pre** | 100 % Sky | best A2 (strict False) | enc + dec + heads      | **768**              |      6 | AdamW: enc 2e‑5 (LLRD 0.8^d) · dec/heads 1e‑4 | cosine‑6  | Rough L1 + .05 SSIM · Metal BCE · AO L1 · Height L1 + .01 TV |
+|    **M0** | 100 % Sky | from M‑pre             | enc + dec + heads      | **1 024**            |      8 | AdamW: enc 1e‑5 · dec/heads 5e‑5              | cosine‑8  | same                                                         |
+|    **M1** | 100 % Sky | best M0                | **one head at a time** | **1 024**            |    5–7 | Adam 1e‑6                                     | Exp 0.9   | same (detach Albedo)                                         |
+
+## 4. Composite‑mosaic rules
+
+| Feed ≤ (px) | Mosaic active? | Grid        | Share (Mat / Sky) |
+| ----------- | -------------- | ----------- | ----------------- |
+| 256         | yes            | 2 × 2 (128) | 30 % / 15 %       |
+| 512         | yes            | 2 × 2 (256) | 25 % / 10 %       |
+| ≥ 768       | **no**         | —           | 0 %               |
 
 ### Metallic scarcity fixes
 
@@ -56,7 +63,7 @@ model.head_metal[0].bias.data.fill_(b0)          # 1×1 conv bias
 bce = torch.nn.BCEWithLogitsLoss(pos_weight = neg/pos)
 ```
 
-## 4. Curriculum snapshot
+## 5. Curriculum snapshot
 
 | Block | SegFormer       | Albedo               | Maps                       |
 | ----- | --------------- | -------------------- | -------------------------- |
@@ -64,14 +71,14 @@ bce = torch.nn.BCEWithLogitsLoss(pos_weight = neg/pos)
 | Mid   | S2–S3 (512-768) | A2 (512-768)         | M-pre (768-1 K) → M0 (1 K) |
 | Late  | S5 (2 K)        | **A3-default (2 K)** | M1 (2 K per-head)          |
 
-## 5. Augmentation key
+## 6. Augmentation key
 
 -   Global safe – h/v flip, 90° rot (all phases)
 -   Colour-jitter – ±5 % hue/sat (MatSynth only)
 -   Composite mosaics – MatSynth only, % per table
 -   SkyPhotometric(p=0.6) – light tint, γ, grain; p = 0.5 in hi-res stages
 
-## 6. Implementation notes
+## 7. Implementation notes
 
 ```python
 # ❶  Weight-transfer Maps ⇐ Albedo
@@ -89,7 +96,7 @@ out = maps(maps_in, segfeat)
 
 ```
 
-## 7. MatSynth category hygiene
+## 8. MatSynth category hygiene
 
 | Category                                                 | Action & Reason                                                                          |
 | -------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -101,7 +108,7 @@ out = maps(maps_in, segfeat)
 | **misc**                                                 | Contains heterogeneous, often modern designs → **drop**.                                 |
 | **ceramic, fabric, ground, leather, metal, wood, stone** | **Keep**. Add `fur` if you have ≥ 100 samples.                                           |
 
-## 8. Texture augmentation table
+## 9. Texture augmentation table
 
 | Category                       | **Safe for ALL domains**<br>(apply blindly) | **Category-Selective**<br>(only if label is known or confidence > 0.8) | **Exclude / Never**                |
 | ------------------------------ | ------------------------------------------- | ---------------------------------------------------------------------- | ---------------------------------- |
