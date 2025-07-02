@@ -514,6 +514,7 @@ def do_train():
         prefetch_factor=2,
         shuffle=False,
         pin_memory=True,
+        persistent_workers=True,
     )
 
     matsynth_validation_loader = DataLoader(
@@ -522,6 +523,7 @@ def do_train():
         num_workers=5,
         shuffle=False,
         pin_memory=True,
+        persistent_workers=True,
     )
 
     # skyrim_train_loader = DataLoader(
