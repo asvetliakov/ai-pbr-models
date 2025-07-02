@@ -10,13 +10,12 @@ from torchvision import transforms as T
 from torchvision.transforms import functional as TF
 from train_dataset import normalize_normal_map
 
-# import albumentations as A
-# import cv2
+import albumentations as A
+import cv2
 
 
-def get_crop_size(epoch: int, total_epochs: int, min_size: int, max_size: int):
-    t = (epoch - 1) / (total_epochs - 1)
-    return int(min_size + t * (max_size - min_size))
+def get_crop_size(epoch: int, crop_sizes: list[int]) -> int:
+    return crop_sizes[epoch - 1]
 
 
 def center_crop(
@@ -318,74 +317,23 @@ def overlay_specular(
     return Image.alpha_composite(metal_crop.convert("RGBA"), sprite).convert("RGB")
 
 
-# elastic_warp = A.ElasticTransform(
-#     alpha=10,  # medium-strength warp (±10 px)
-#     sigma=6,  # smoothness
-#     # alpha_affine=0,  # disable affine component
-#     interpolation=cv2.INTER_LANCZOS4,
-#     border_mode=cv2.BORDER_REFLECT_101,
-#     approximate=False,
-#     same_dxdy=False,
-#     mask_interpolation=cv2.INTER_NEAREST,
-#     noise_distribution="gaussian",
-#     p=0.4,  # 40% of images warped
-# )
+warp = A.ElasticTransform(
+    alpha=15,  # medium-strength warp (±15 px)
+    sigma=6,  # smoothness
+    # alpha_affine=1,
+    interpolation=cv2.INTER_LANCZOS4,
+    border_mode=cv2.BORDER_REFLECT_101,
+    approximate=False,
+    same_dxdy=True,
+    mask_interpolation=cv2.INTER_NEAREST,
+    noise_distribution="gaussian",
+    p=1,
+)
 
-# def elastic_warp(
-#     img: Image.Image, grid: int = 4, magnitude: float = 10.0
-# ) -> Image.Image:
-#     """
-#     Apply a small elastic grid warp to a PIL RGB image.
-
-#     Args:
-#       img       -- PIL.Image RGB
-#       grid      -- number of grid cells per axis (e.g. 4 → 4×4 mesh)
-#       magnitude -- max displacement (in pixels) for each mesh point
-
-#     Returns:
-#       A new PIL.Image with a slight elastic warp.
-#     """
-#     W, H = img.size
-#     gx = min(grid, W)
-#     x_step = max(1, W // gx)
-#     gy = min(grid, H)
-#     y_step = max(1, H // gy)
-
-#     mesh = []
-#     for i in range(gx):
-#         for j in range(gy):
-#             x0, y0 = i * x_step, j * y_step
-#             x1 = min((i + 1) * x_step, W)
-#             y1 = min((j + 1) * y_step, H)
-
-#             # destination quad
-#             dx0 = random.uniform(-magnitude, magnitude)
-#             dy0 = random.uniform(-magnitude, magnitude)
-#             dx1 = random.uniform(-magnitude, magnitude)
-#             dy1 = random.uniform(-magnitude, magnitude)
-
-#             bbox = (x0, y0, x1, y1)
-#             mesh_quad = (
-#                 x0 + dx0,
-#                 y0 + dy0,  # top-left
-#                 x1 + dx1,
-#                 y0 + dy0,  # top-right
-#                 x1 + dx1,
-#                 y1 + dy1,  # bottom-right
-#                 x0 + dx0,
-#                 y1 + dy1,  # bottom-left
-#             )
-#             mesh.append((bbox, mesh_quad))
-
-#     return img.transform(
-#         (W, H),
-#         Image.Transform.MESH,
-#         mesh,
-#         resample=Image.Resampling.BICUBIC,
-#     )
+elastic_warp = A.Compose([warp], additional_targets={"normal": "image"})
 
 
-def selective_aug(image, category: str) -> Image.Image:
+def selective_aug(image, normal, category: str) -> tuple[Image.Image, Image.Image]:
     if category == "wood":
         if random.random() < 0.5:
             image = TF.adjust_brightness(
@@ -419,13 +367,13 @@ def selective_aug(image, category: str) -> Image.Image:
     elif category == "fabric":
         if random.random() < 0.5:
             image = TF.adjust_hue(image, hue_factor=random.uniform(-0.12, 0.12))
-        # not worth headache for now
-        # if random.random() < 0.3:
-        #     alb_np = np.array(albedo)
-        #     norm_np = np.array(normal)
-        #     data = elastic_warp(image=alb_np, mask=norm_np)
-        #     albedo = Image.fromarray(data["image"])
-        #     normal = Image.fromarray(data["mask"])
+        if random.random() < 0.3:
+            image_np = np.array(image)
+            norm_np = np.array(normal)
+            data = elastic_warp(image=image_np, normal=norm_np)
+            image = Image.fromarray(data["image"])
+            normal = Image.fromarray(data["normal"])
+            normal = normalize_normal_map(normal)  # type: ignore
     elif category == "leather":
         if random.random() < 0.5:
             image = TF.adjust_brightness(
@@ -448,7 +396,7 @@ def selective_aug(image, category: str) -> Image.Image:
                 persistence=0.5,  # contrast of layers
                 lacunarity=2.0,  # frequency multiplier between octaves
             )
-    return image  # type: ignore
+    return (image, normal)  # type: ignore
 
 
 def make_full_image_mask(category_id: int, img_size: tuple[int, int]) -> torch.Tensor:
