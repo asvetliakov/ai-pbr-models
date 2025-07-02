@@ -319,7 +319,7 @@ def overlay_specular(
 
 warp = A.ElasticTransform(
     alpha=15,  # medium-strength warp (±15 px)
-    sigma=6,  # smoothness
+    sigma=8,  # smoothness
     # alpha_affine=1,
     interpolation=cv2.INTER_LANCZOS4,
     border_mode=cv2.BORDER_REFLECT_101,
@@ -329,8 +329,25 @@ warp = A.ElasticTransform(
     noise_distribution="gaussian",
     p=1,
 )
+# 2) Warp blur: motion + gaussian blur to “smear” the weave
+warp_blur = A.OneOf(
+    [
+        A.MotionBlur(blur_limit=(3, 7), p=1.0),
+        A.GaussianBlur(blur_limit=(3, 7), p=1.0),
+    ],
+    p=0.3,
+)
+
+# 3) Local contrast jitter: CLAHE on small tiles
+local_contrast = A.CLAHE(
+    clip_limit=(1.5, 3.0),
+    tile_grid_size=(8, 8),
+    p=0.3,
+)
 
 elastic_warp = A.Compose([warp], additional_targets={"normal": "image"})
+
+fabric_aug = A.Compose([warp_blur, local_contrast])
 
 
 def selective_aug(image, normal, category: str) -> tuple[Image.Image, Image.Image]:
@@ -374,6 +391,13 @@ def selective_aug(image, normal, category: str) -> tuple[Image.Image, Image.Imag
             image = Image.fromarray(data["image"])
             normal = Image.fromarray(data["normal"])
             normal = normalize_normal_map(normal)  # type: ignore
+
+        # 30% chance warp blur AND 30% chance local contrast (independent)
+        image_np = np.array(image)
+        data2 = fabric_aug(image=image_np)
+        image_np = data2["image"]
+        image = Image.fromarray(image_np)
+
     elif category == "leather":
         if random.random() < 0.5:
             image = TF.adjust_brightness(
@@ -381,6 +405,23 @@ def selective_aug(image, normal, category: str) -> tuple[Image.Image, Image.Imag
             )
         if random.random() < 0.5:
             image = TF.adjust_hue(image, hue_factor=random.uniform(-0.08, 0.08))
+        if random.random() < 0.3:
+            image = overlay_dirt(
+                image,  # type: ignore
+                strength=random.uniform(0.05, 0.10),  # 5–10% opacity – very subtle
+                scale=random.uniform(50.0, 200.0),  # small blobs: 50–200 px size
+                octaves=4,  # enough layers for texture complexity
+                persistence=0.4,  # slightly lower contrast per octave
+                lacunarity=2.0,  # keep frequency jumps moderate
+            )
+        if random.random() < 0.3:
+            image = overlay_specular(
+                image,  # type: ignore
+                radius=random.uniform(
+                    0.02, 0.05
+                ),  # spot size 2–5% of width (e.g. ~5–25 px on a 512 px patch)
+                strength=random.uniform(0.03, 0.08),  # opacity 3–8%
+            )
     # Ground, cermaic
     else:
         if random.random() < 0.5:
