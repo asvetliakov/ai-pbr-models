@@ -72,8 +72,8 @@ from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
 
 # HYPER_PARAMETERS
-EPOCHS = 10  # Number of epochs to train
-LR = 1e-5  # Learning rate for the optimizer
+EPOCHS = 8  # Number of epochs to train
+LR = 1e-6  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
 # PHASE = "a"  # Phase of the training per plan, used for logging and saving
@@ -139,18 +139,18 @@ skyrim_validation_dataset.all_validation_samples = (
     skyrim_train_dataset.all_validation_samples
 )
 
-CROP_SIZE = 512
+CROP_SIZE = 1024
 
-BATCH_SIZE_MATSYNTH = 18
-BATCH_SIZE_SKYRIM = 6
-BATCH_SIZE_VALIDATION_MATSYNTH = 18
-BATCH_SIZE_VALIDATION_SKYRIM = 6
+BATCH_SIZE_MATSYNTH = 2
+BATCH_SIZE_SKYRIM = 2
+BATCH_SIZE_VALIDATION_MATSYNTH = 3
+BATCH_SIZE_VALIDATION_SKYRIM = 1
 
-MATSYNTH_COMPOSITES = True
+MATSYNTH_COMPOSITES = False
 MATSYNTH_COLOR_AUGMENTATIONS = True
 MATSYNTH_2_CROP_CHANGE = 0.25
 MATSYNTH_4_CROP_CHANGE = 0.1
-SKYRIM_PHOTOMETRIC = 0.6  # Photometric augmentation strength for Skyrim dataset
+SKYRIM_PHOTOMETRIC = 0.5  # Photometric augmentation strength for Skyrim dataset
 
 BATCH_SIZE = (
     BATCH_SIZE_MATSYNTH
@@ -211,46 +211,6 @@ def get_model():
             )
 
     return model, best_model_checkpoint
-
-
-# # Freeze everything except the LoRA layers and decode head
-# for p in model.parameters():
-#     p.requires_grad = False
-
-# Phase S4, unfreeze all BatchNorm and LayerNorm layers only
-# for name, module in model.named_modules():
-#     if isinstance(module, (torch.nn.BatchNorm2d, torch.nn.LayerNorm)):
-#         # both weight (gamma) and bias (beta) of each norm layer
-#         module.weight.requires_grad = True
-#         module.bias.requires_grad = True
-
-# Unfreeze LoRA layers and decode head
-# for name, p in model.named_parameters():
-#     if "decode_head" in name:
-#         # if "decode_head" in name or "lora_" in name
-#         p.requires_grad = True
-
-# # Override the BN momentum on all BatchNorm2d layers
-# for m in model.modules():
-#     if isinstance(m, torch.nn.BatchNorm2d):
-#         # Default momentum is 0.1; we lower it so running stats update faster
-#         m.momentum = 0.01
-
-# Phase S3
-# Unfreeze decode head
-# for p in model.base_model.model.decode_head.parameters():  # type: ignore
-#     p.requires_grad = True
-
-# Unfreeze TOP 1/2 of the encoder blocks (+ their LoRA)
-# enc_blocks = model.base_model.model.segformer.encoder.block  # type: ignore # nn.ModuleList
-# start_idx = len(enc_blocks) // 2  # type: ignore # halfway index
-# for blk in enc_blocks[start_idx:]:  # type: ignore
-#     for p in blk.parameters():  # type: ignore
-#         p.requires_grad = True
-
-# for n, p in model.named_parameters():
-#     if p.requires_grad:
-#         print(f"parameter: {n}")
 
 
 def matsynth_transform_train_fn(example):
@@ -509,45 +469,70 @@ def do_train():
 
     for name, p in model.named_parameters():
         if "decode_head" in name or "lora_" in name:
+            # if "decode_head" in name:
             p.requires_grad = True
+
+    # Unfreeze TOP 1/2 of the encoder blocks (+ their LoRA)
+    # enc_blocks = model.base_model.model.segformer.encoder.block  # type: ignore # nn.ModuleList
+    # start_idx = len(enc_blocks) // 2  # type: ignore # halfway index
+    # for blk in enc_blocks[start_idx:]:  # type: ignore
+    #     for p in blk.parameters():  # type: ignore
+    #         p.requires_grad = True
+
+    # Phase S4, unfreeze all BatchNorm and LayerNorm layers only
+    # for name, module in model.named_modules():
+    #     if isinstance(module, (torch.nn.BatchNorm2d, torch.nn.LayerNorm)):
+    #         # both weight (gamma) and bias (beta) of each norm layer
+    #         module.weight.requires_grad = True
+    #         module.bias.requires_grad = True
+
+    # # Override the BN momentum on all BatchNorm2d layers
+    # for m in model.modules():
+    #     if isinstance(m, torch.nn.BatchNorm2d):
+    #         # Default momentum is 0.1; we lower it so running stats update faster
+    #         m.momentum = 0.01
+
+    # for n, p in model.named_parameters():
+    #     if p.requires_grad:
+    #         print(f"Trainable parameter: {n}")
 
     matsynth_train_loader = DataLoader(
         matsynth_train_dataset,  # type: ignore
         batch_size=BATCH_SIZE_MATSYNTH,
         sampler=train_sampler,
-        num_workers=8,
-        prefetch_factor=2,
+        # num_workers=6,
+        # prefetch_factor=2,
         shuffle=False,
-        pin_memory=True,
-        persistent_workers=True,
+        # pin_memory=True,
+        # persistent_workers=True,
     )
 
     matsynth_validation_loader = DataLoader(
         matsynth_validation_dataset,  # type: ignore
         batch_size=BATCH_SIZE_VALIDATION_MATSYNTH,
-        num_workers=4,
+        # num_workers=4,
         shuffle=False,
-        pin_memory=True,
-        persistent_workers=True,
+        # pin_memory=True,
+        # persistent_workers=True,
     )
 
     skyrim_train_loader = DataLoader(
         skyrim_train_dataset,
         batch_size=BATCH_SIZE_SKYRIM,
-        num_workers=2,
-        prefetch_factor=2,
+        # num_workers=6,
+        # prefetch_factor=2,
         shuffle=True,
-        pin_memory=True,
-        persistent_workers=True,
+        # pin_memory=True,
+        # persistent_workers=True,
     )
 
     skyrim_validation_loader = DataLoader(
         skyrim_validation_dataset,
         batch_size=BATCH_SIZE_VALIDATION_SKYRIM,
         shuffle=False,
-        num_workers=2,
-        pin_memory=True,
-        persistent_workers=True,
+        # num_workers=2,
+        # pin_memory=True,
+        # persistent_workers=True,
     )
 
     matsynth_train_iter = cycle(matsynth_train_loader)
@@ -611,13 +596,13 @@ def do_train():
         optimizer.load_state_dict(best_model_checkpoint["optimizer_state_dict"])
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=2e-6
+        optimizer, T_max=EPOCHS, eta_min=2e-7
     )
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     #     optimizer,
     #     T_0=1,
     #     T_mult=1,
-    #     eta_min=2e-6,  # Minimum learning rate
+    #     eta_min=1e-6,  # Minimum learning rate
     # )
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(
     #     optimizer,
@@ -744,19 +729,20 @@ def do_train():
                 skyrim_base_mask = skyrim_confidence >= 0.8
 
                 # Our confidence for fabric & leather is not great from S1 checkpoint so use a lower threshold
-                skyrim_fabric_mask = (
-                    skyrim_pred_labels
-                    == matsynth_train_dataset.CLASS_LIST_IDX_MAPPING["fabric"]
-                ) & (skyrim_confidence > 0.6)
+                # skyrim_fabric_mask = (
+                #     skyrim_pred_labels
+                #     == matsynth_train_dataset.CLASS_LIST_IDX_MAPPING["fabric"]
+                # ) & (skyrim_confidence > 0.6)
 
-                skyrim_leather_mask = (
-                    skyrim_pred_labels
-                    == matsynth_train_dataset.CLASS_LIST_IDX_MAPPING["leather"]
-                ) & (skyrim_confidence > 0.6)
+                # skyrim_leather_mask = (
+                #     skyrim_pred_labels
+                #     == matsynth_train_dataset.CLASS_LIST_IDX_MAPPING["leather"]
+                # ) & (skyrim_confidence > 0.6)
 
-                skyrim_mask = (
-                    skyrim_base_mask | skyrim_fabric_mask | skyrim_leather_mask
-                )
+                # skyrim_mask = (
+                #     skyrim_base_mask | skyrim_fabric_mask | skyrim_leather_mask
+                # )
+                skyrim_mask = skyrim_base_mask
 
                 if skyrim_mask.any():
 
@@ -880,22 +866,23 @@ def do_train():
                         dim=1
                     ).max(dim=1)
                     # build a mask of high-confidence pixels
-                    skyrim_base_mask = skyrim_confidence >= 0.6
+                    skyrim_base_mask = skyrim_confidence >= 0.8
 
                     # Our confidence for fabric is not great from S1 checkpoint so use a lower threshold
-                    skyrim_fabric_mask = (
-                        skyrim_pred_labels
-                        == matsynth_train_dataset.CLASS_LIST_IDX_MAPPING["fabric"]
-                    ) & (skyrim_confidence > 0.6)
+                    # skyrim_fabric_mask = (
+                    #     skyrim_pred_labels
+                    #     == matsynth_train_dataset.CLASS_LIST_IDX_MAPPING["fabric"]
+                    # ) & (skyrim_confidence > 0.6)
 
-                    skyrim_leather_mask = (
-                        skyrim_pred_labels
-                        == matsynth_train_dataset.CLASS_LIST_IDX_MAPPING["leather"]
-                    ) & (skyrim_confidence > 0.6)
+                    # skyrim_leather_mask = (
+                    #     skyrim_pred_labels
+                    #     == matsynth_train_dataset.CLASS_LIST_IDX_MAPPING["leather"]
+                    # ) & (skyrim_confidence > 0.6)
 
-                    skyrim_mask = (
-                        skyrim_base_mask | skyrim_fabric_mask | skyrim_leather_mask
-                    )
+                    # skyrim_mask = (
+                    #     skyrim_base_mask | skyrim_fabric_mask | skyrim_leather_mask
+                    # )
+                    skyrim_mask = skyrim_base_mask
 
                     if skyrim_mask.any():
                         # % of pixels above 0.8
@@ -1033,6 +1020,9 @@ def do_train():
                     f"Early stopping at epoch {epoch + 1}, no improvement for {patience} epochs."
                 )
                 break
+
+        val_all_labels = []
+        val_all_preds = []
 
         torch.cuda.synchronize()  # ensure all kernels are done
         torch.cuda.empty_cache()  # release fragmented blocks

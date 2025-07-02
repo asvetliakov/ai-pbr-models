@@ -318,8 +318,8 @@ def overlay_specular(
 
 
 warp = A.ElasticTransform(
-    alpha=15,  # medium-strength warp (±15 px)
-    sigma=8,  # smoothness
+    alpha=30,  # medium-strength warp (±15 px)
+    sigma=15,  # smoothness
     # alpha_affine=1,
     interpolation=cv2.INTER_LANCZOS4,
     border_mode=cv2.BORDER_REFLECT_101,
