@@ -7,3 +7,6 @@ segformer_sample_test
 test_output
 skyrim_samples
 skyrim_processed
+skyrim_cache_all.json
+skyrim_cache_pbr.json
+matsynth_cache.json

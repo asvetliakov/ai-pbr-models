@@ -3,11 +3,14 @@ import os
 from PIL import Image
 from pathlib import Path
 import torch
+import json
 import random
 import numpy as np
 from torch.utils.data import Dataset
 from typing import Callable, Optional, Tuple
 
+BASE_DIR = Path(__file__).resolve().parent
+CACHE_FILE = (BASE_DIR / "matsynth_cache.json").resolve()
 
 def normalize_normal_map(normal: Image.Image) -> Image.Image:
     """
@@ -87,15 +90,22 @@ class SimpleImageDataset(Dataset):
             return
 
         sample_names_per_category = {name: [] for name in self.CLASS_LIST}
+        if CACHE_FILE.exists():
+            with open(CACHE_FILE, "r") as f:
+                sample_names_per_category = json.load(f)
+        else:
+            for metdata in Path(self.matsynth_input_dir).glob("**/*.json"):
+                category_name = metdata.parent.name
+                name = metdata.stem
+                category_idx = self.CLASS_LIST_IDX_MAPPING.get(category_name, None)
+                if category_idx is None:
+                    print(f"Warning: Category '{category_name}' not in CLASS_LIST.")
 
-        for metdata in Path(self.matsynth_input_dir).glob("**/*.json"):
-            category_name = metdata.parent.name
-            name = metdata.stem
-            category_idx = self.CLASS_LIST_IDX_MAPPING.get(category_name, None)
-            if category_idx is None:
-                print(f"Warning: Category '{category_name}' not in CLASS_LIST.")
-
-            sample_names_per_category[category_name].append(name)
+                sample_names_per_category[category_name].append(name)
+            
+            # Save the sample names to cache
+            with open(CACHE_FILE, "w") as f:
+                json.dump(sample_names_per_category, f, indent=4)
 
         for category, names in sample_names_per_category.items():
             names = sorted(names)
@@ -161,8 +171,8 @@ class SimpleImageDataset(Dataset):
         sample_weights_per_class = 1.0 / (cls_counts + 1e-6)
         # Boost metal class weight so it will appear more often
         # sample_weights_per_class[self.METAL_IDX] *= 1.5
-        # sample_weights_per_class[self.CLASS_LIST_IDX_MAPPING["fabric"]] *= 2.5
-        # sample_weights_per_class[self.CLASS_LIST_IDX_MAPPING["leather"]] *= 1.5
+        # sample_weights_per_class[self.CLASS_LIST_IDX_MAPPING["fabric"]] *= 1.5
+        # sample_weights_per_class[self.CLASS_LIST_IDX_MAPPING["leather"]] *= 2.5
         sample_weights = sample_weights_per_class[all_labels]
 
         return loss_weights, sample_weights
