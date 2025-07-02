@@ -101,27 +101,27 @@ class SkyrimDataset(Dataset):
 
         sample["normal"] = Image.open(sample["normal"]).convert("RGB")
 
-        if sample["basecolor"].exists():
+        if Path(sample["basecolor"]).exists():
             sample["basecolor"] = Image.open(sample["basecolor"]).convert("RGB")
         else:
             sample["basecolor"] = None
 
-        if sample["ao"].exists():
+        if Path(sample["ao"]).exists():
             sample["ao"] = Image.open(sample["ao"]).convert("L")
         else:
             sample["ao"] = None
 
-        if sample["parallax"].exists():
+        if Path(sample["parallax"]).exists():
             sample["parallax"] = Image.open(sample["parallax"]).convert("L")
         else:
             sample["parallax"] = None
 
-        if sample["metallic"].exists():
+        if Path(sample["metallic"]).exists():
             sample["metallic"] = Image.open(sample["metallic"]).convert("L")
         else:
             sample["metallic"] = None
 
-        if sample["roughness"].exists():
+        if Path(sample["roughness"]).exists():
             sample["roughness"] = Image.open(sample["roughness"]).convert("L")
         else:
             sample["roughness"] = None

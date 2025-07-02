@@ -12,6 +12,7 @@ from typing import Callable, Optional, Tuple
 BASE_DIR = Path(__file__).resolve().parent
 CACHE_FILE = (BASE_DIR / "matsynth_cache.json").resolve()
 
+
 def normalize_normal_map(normal: Image.Image) -> Image.Image:
     """
     Take a PIL normal map (RGB, 0–255), renormalize each pixel vector to length 1,
@@ -102,7 +103,7 @@ class SimpleImageDataset(Dataset):
                     print(f"Warning: Category '{category_name}' not in CLASS_LIST.")
 
                 sample_names_per_category[category_name].append(name)
-            
+
             # Save the sample names to cache
             with open(CACHE_FILE, "w") as f:
                 json.dump(sample_names_per_category, f, indent=4)
@@ -172,7 +173,7 @@ class SimpleImageDataset(Dataset):
         # Boost metal class weight so it will appear more often
         # sample_weights_per_class[self.METAL_IDX] *= 1.5
         # sample_weights_per_class[self.CLASS_LIST_IDX_MAPPING["fabric"]] *= 1.5
-        # sample_weights_per_class[self.CLASS_LIST_IDX_MAPPING["leather"]] *= 2.5
+        # sample_weights_per_class[self.CLASS_LIST_IDX_MAPPING["leather"]] *= 1.5
         sample_weights = sample_weights_per_class[all_labels]
 
         return loss_weights, sample_weights

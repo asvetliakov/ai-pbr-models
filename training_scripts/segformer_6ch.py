@@ -57,8 +57,8 @@ def create_segformer(
     if lora:
         # LoRA added in S2
         lora_config = LoraConfig(
-            r=24,  # Rank of the LoRA layers # type: ignore
-            lora_alpha=48,  # Scaling factor for the LoRA layers # type: ignore
+            r=16,  # Rank of the LoRA layers # type: ignore
+            lora_alpha=32,  # Scaling factor for the LoRA layers # type: ignore
             target_modules=[  # type: ignore
                 "attention.self.query",
                 "attention.self.value",
