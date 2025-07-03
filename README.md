@@ -27,11 +27,11 @@ Class weights = `1 / √freq(class)`; WeightedRandomSampler active in every phas
 
 ## 2. UNet‑Albedo (A)
 
-|  Phase | Dataset mix         | Trainables          | **Crop / Feed (px)** | Augment†                           | Epochs | Optimiser & LR (per‑group)                            | Scheduler                           | Loss                       |
-| -----: | ------------------- | ------------------- | -------------------- | ---------------------------------- | -----: | ----------------------------------------------------- | ----------------------------------- | -------------------------- |
-| **A1** | 50 % Mat / 50 % Sky | full UNet + FiLM    | **256**              | flips · rot · colour, SkyPhoto 0.6 |     35 | AdamW — enc 2e‑4 · dec 2e‑4 · FiLM 3e‑4 · head 2.5e‑4 | OneCycle (pct 0.2, cos, final 1e‑5) | L1 + 0.1 SSIM + 0.05 LPIPS |
-| **A2** | 25 % Mat / 75 % Sky | decoder + FiLM      | **512**              | A1 aug + SkyPhoto 0.6              |     10 | AdamW 1e‑5                                            | cosine‑10                           | same                       |
-| **A3** | 100 % Sky           | **1 × 1 head only** | **1 024**            | none                               |      3 | Adam 5e‑7                                             | Exp 0.9                             | same                       |
+|  Phase | Dataset mix         | Trainables          | **Crop / Feed (px)** | Augment†                  | Epochs | Optimiser & LR (per‑group)                            | Scheduler                           | Loss                       |
+| -----: | ------------------- | ------------------- | -------------------- | ------------------------- | -----: | ----------------------------------------------------- | ----------------------------------- | -------------------------- |
+| **A1** | 50 % Mat / 50 % Sky | full UNet + FiLM    | **256**              | flips · rot, SkyPhoto 0.6 |     45 | AdamW — enc 2e‑4 · dec 2e‑4 · FiLM 3e‑4 · head 2.5e‑4 | OneCycle (pct 0.2, cos, final 1e‑5) | L1 + 0.1 SSIM + 0.08 LPIPS |
+| **A2** | 25 % Mat / 75 % Sky | decoder + FiLM      | **512**              | A1 aug + SkyPhoto 0.6     |     14 | AdamW 1e‑5                                            | cosine‑14                           | same                       |
+| **A3** | 100 % Sky           | **1 × 1 head only** | **1 024**            | none                      |      5 | Adam 5e‑7                                             | Exp 0.9                             | same                       |
 
 _Save the **best A2** checkpoint → encoder donor for Maps._
 

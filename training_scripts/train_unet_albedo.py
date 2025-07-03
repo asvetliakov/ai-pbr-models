@@ -72,7 +72,7 @@ args = parser.parse_args()
 print(f"Training phase: {args.phase}")
 
 # HYPER_PARAMETERS
-EPOCHS = 3  # Number of epochs to train
+EPOCHS = 5  # Number of epochs to train
 LR = 5e-7  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
@@ -85,6 +85,8 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = (
     False  # For some reason it may slows down consequent epochs
 )
+
+VISUAL_SAMPLES_COUNT = 16  # Number of samples to visualize in validation
 
 matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
 skyrim_dir = (BASE_DIR / "../skyrim_processed").resolve()
@@ -137,7 +139,7 @@ BATCH_SIZE_VALIDATION_MATSYNTH = 0
 BATCH_SIZE_VALIDATION_SKYRIM = 4
 
 MATSYNTH_COLOR_AUGMENTATIONS = False
-SKYRIM_PHOTOMETRIC = 0.0
+SKYRIM_PHOTOMETRIC = 0.3
 
 BATCH_SIZE = (
     BATCH_SIZE_MATSYNTH
@@ -429,7 +431,7 @@ def calculate_unet_albedo_loss(
     ecpoch_data["unet_albedo"][key]["lpips"] += lpips.item()
 
     # Total loss
-    total_loss = l1_loss + 0.1 * ssim_loss + 0.05 * lpips
+    total_loss = l1_loss + 0.1 * ssim_loss + 0.08 * lpips
 
     ecpoch_data["unet_albedo"][key]["total_loss"] += total_loss.item()
 
@@ -482,6 +484,9 @@ def do_train():
 
     for param in unet_alb.out.parameters():
         param.requires_grad = True
+
+    # for param in unet_alb.unet.decoder.parameters():
+    #     param.requires_grad = True
 
     # for param in unet_alb.unet.film.parameters():  # type: ignore
     #     param.requires_grad = True
@@ -541,10 +546,12 @@ def do_train():
 
     optimizer = torch.optim.AdamW(
         trainable,
+        # [enc_params, dec_params, film_params, head_params],
         # filter(lambda p: p.requires_grad, unet_alb.parameters()),
         # lr=LR,
         # weight_decay=WD,
         # [enc_params, dec_params, film_params, head_params],
+        lr=LR,
         betas=(0.9, 0.999),
         eps=1e-8,
         weight_decay=WD,
@@ -604,9 +611,6 @@ def do_train():
     for epoch in range(start_epoch, EPOCHS):
         unet_alb.train()
 
-        # # Batch size = 4 fits into VRAM of 5090 but it's slow. Much faster to use gradient accumulation with batch size = 2
-        # accum_steps = 2
-
         epoch_data = {
             "epoch": epoch + 1,
             "train": {
@@ -622,7 +626,6 @@ def do_train():
             desc=f"Epoch {epoch + 1}/{EPOCHS} - Training",
             unit="batch",
         )
-        # optimizer.zero_grad()
 
         for i in bar:
             # matsynth_batch = next(matsynth_train_iter)
@@ -689,19 +692,11 @@ def do_train():
             # loss.backward()
             # optimizer.step()
 
-            # ① scale down so that sum over accum_steps equals real batch gradient
-            # total_loss = total_loss / accum_steps
             scaler.scale(total_loss).backward()
 
             scaler.step(optimizer)
             scaler.update()
             # scheduler.step()
-
-            # if (i + 1) % accum_steps == 0 or (i + 1) == len(train_loader):
-            #     scaler.step(optimizer)
-            #     scaler.update()
-            #     optimizer.zero_grad()
-            #     scheduler.step()
 
         calculate_avg(epoch_data, key="train")
 
@@ -790,7 +785,10 @@ def do_train():
 
                 epoch_data["validation"]["batch_count"] += 1
 
-                if num_samples_saved < 64:
+                if (
+                    VISUAL_SAMPLES_COUNT > 0
+                    and num_samples_saved < VISUAL_SAMPLES_COUNT
+                ):
                     for (
                         sample_diffuse,
                         sample_normal,

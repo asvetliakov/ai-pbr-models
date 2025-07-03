@@ -95,8 +95,8 @@ class SkyrimPhotometric:
             return img
         # torchvision img → tensor in [0,1]
         img = TF.to_tensor(img) if not torch.is_tensor(img) else img
-        if random.random() < 0.5:
-            img = self.ao(img)
+        # if random.random() < 0.5:
+        #     img = self.ao(img)
         if random.random() < 0.5:
             img = self.wb(img)
         if random.random() < 0.5:
