@@ -500,11 +500,11 @@ def do_train():
         matsynth_train_dataset,  # type: ignore
         batch_size=BATCH_SIZE_MATSYNTH,
         sampler=train_sampler,
-        # num_workers=6,
-        # prefetch_factor=2,
+        num_workers=2,
+        prefetch_factor=2,
         shuffle=False,
-        # pin_memory=True,
-        # persistent_workers=True,
+        pin_memory=True,
+        persistent_workers=True,
     )
 
     matsynth_validation_loader = DataLoader(
@@ -519,11 +519,11 @@ def do_train():
     skyrim_train_loader = DataLoader(
         skyrim_train_dataset,
         batch_size=BATCH_SIZE_SKYRIM,
-        # num_workers=6,
-        # prefetch_factor=2,
+        num_workers=2,
+        prefetch_factor=2,
         shuffle=True,
-        # pin_memory=True,
-        # persistent_workers=True,
+        pin_memory=True,
+        persistent_workers=True,
     )
 
     skyrim_validation_loader = DataLoader(
