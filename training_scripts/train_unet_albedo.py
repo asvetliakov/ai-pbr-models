@@ -72,8 +72,8 @@ args = parser.parse_args()
 print(f"Training phase: {args.phase}")
 
 # HYPER_PARAMETERS
-EPOCHS = 35  # Number of epochs to train
-LR = 2e-4  # Learning rate for the optimizer
+EPOCHS = 3  # Number of epochs to train
+LR = 5e-7  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
 PHASE = args.phase  # Phase of the training per plan, used for logging and saving
@@ -81,7 +81,10 @@ PHASE = args.phase  # Phase of the training per plan, used for logging and savin
 # Enable TF32 for faster training on Ampere GPUs
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-torch.backends.cudnn.benchmark = True  # Enable for faster training on fixed input sizes
+# torch.backends.cudnn.benchmark = True  # Enable for faster training on fixed input sizes
+torch.backends.cudnn.benchmark = (
+    False  # For some reason it may slows down consequent epochs
+)
 
 matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
 skyrim_dir = (BASE_DIR / "../skyrim_processed").resolve()
@@ -126,12 +129,12 @@ skyrim_validation_dataset.all_validation_samples = (
     skyrim_train_dataset.all_validation_samples
 )
 
-CROP_SIZE = 256
+CROP_SIZE = 1024
 
-BATCH_SIZE_MATSYNTH = 16
-BATCH_SIZE_SKYRIM = 16
-BATCH_SIZE_VALIDATION_MATSYNTH = 16
-BATCH_SIZE_VALIDATION_SKYRIM = 16
+BATCH_SIZE_MATSYNTH = 0
+BATCH_SIZE_SKYRIM = 4
+BATCH_SIZE_VALIDATION_MATSYNTH = 0
+BATCH_SIZE_VALIDATION_SKYRIM = 4
 
 MATSYNTH_COLOR_AUGMENTATIONS = False
 SKYRIM_PHOTOMETRIC = 0.0
@@ -469,35 +472,44 @@ skyrim_validation_dataset.set_transform(transform_val_fn)
 # Training loop
 def do_train():
     print(
-        f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE) * 2} Samples, MatSynth/Skyrim Batch: {BATCH_SIZE_MATSYNTH}/{BATCH_SIZE_SKYRIM}, validation on {MIN_SAMPLES_VALIDATION * 2} samples."
+        f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, MatSynth/Skyrim Batch: {BATCH_SIZE_MATSYNTH}/{BATCH_SIZE_SKYRIM}, validation on {MIN_SAMPLES_VALIDATION} samples."
     )
 
     unet_alb, segformer, checkpoint = get_model()
 
-    matsynth_train_loader = DataLoader(
-        matsynth_train_dataset,  # type: ignore
-        batch_size=BATCH_SIZE_MATSYNTH,
-        sampler=train_sampler,
-        num_workers=6,
-        prefetch_factor=2,
-        shuffle=False,
-        pin_memory=True,
-        persistent_workers=True,
-    )
+    for param in unet_alb.parameters():
+        param.requires_grad = False
 
-    matsynth_validation_loader = DataLoader(
-        matsynth_validation_dataset,  # type: ignore
-        batch_size=BATCH_SIZE_VALIDATION_MATSYNTH,
-        num_workers=3,
-        shuffle=False,
-        pin_memory=True,
-        persistent_workers=True,
-    )
+    for param in unet_alb.out.parameters():
+        param.requires_grad = True
+
+    # for param in unet_alb.unet.film.parameters():  # type: ignore
+    #     param.requires_grad = True
+
+    # matsynth_train_loader = DataLoader(
+    #     matsynth_train_dataset,  # type: ignore
+    #     batch_size=BATCH_SIZE_MATSYNTH,
+    #     sampler=train_sampler,
+    #     num_workers=3,
+    #     prefetch_factor=2,
+    #     shuffle=False,
+    #     pin_memory=True,
+    #     persistent_workers=True,
+    # )
+
+    # matsynth_validation_loader = DataLoader(
+    #     matsynth_validation_dataset,  # type: ignore
+    #     batch_size=BATCH_SIZE_VALIDATION_MATSYNTH,
+    #     num_workers=3,
+    #     shuffle=False,
+    #     pin_memory=True,
+    #     persistent_workers=True,
+    # )
 
     skyrim_train_loader = DataLoader(
         skyrim_train_dataset,
         batch_size=BATCH_SIZE_SKYRIM,
-        num_workers=6,
+        num_workers=4,
         prefetch_factor=2,
         shuffle=True,
         pin_memory=True,
@@ -508,27 +520,31 @@ def do_train():
         skyrim_validation_dataset,
         batch_size=BATCH_SIZE_VALIDATION_SKYRIM,
         shuffle=False,
-        num_workers=3,
+        num_workers=4,
         pin_memory=True,
+        prefetch_factor=2,
         persistent_workers=True,
     )
 
-    matsynth_train_iter = cycle(matsynth_train_loader)
+    # matsynth_train_iter = cycle(matsynth_train_loader)
     skyrim_train_iter = cycle(skyrim_train_loader)
 
-    matsynth_validation_iter = cycle(matsynth_validation_loader)
+    # matsynth_validation_iter = cycle(matsynth_validation_loader)
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
-    enc_params = {"params": unet_alb.unet.encoder.parameters(), "lr": 2e-4}
-    dec_params = {"params": unet_alb.unet.decoder.parameters(), "lr": 2e-4}
-    film_params = {"params": unet_alb.unet.film.parameters(), "lr": 3e-4}  # type: ignore
-    head_params = {"params": unet_alb.out.parameters(), "lr": 2.5e-4}
+    # enc_params = {"params": unet_alb.unet.encoder.parameters(), "lr": 2e-4}
+    # dec_params = {"params": unet_alb.unet.decoder.parameters(), "lr": 2e-4}
+    # film_params = {"params": unet_alb.unet.film.parameters(), "lr": 3e-4}  # type: ignore
+    # head_params = {"params": unet_alb.out.parameters(), "lr": 2.5e-4}
+
+    trainable = [p for p in unet_alb.parameters() if p.requires_grad]
 
     optimizer = torch.optim.AdamW(
+        trainable,
         # filter(lambda p: p.requires_grad, unet_alb.parameters()),
         # lr=LR,
         # weight_decay=WD,
-        [enc_params, dec_params, film_params, head_params],
+        # [enc_params, dec_params, film_params, head_params],
         betas=(0.9, 0.999),
         eps=1e-8,
         weight_decay=WD,
@@ -537,7 +553,9 @@ def do_train():
         print("Loading optimizer state from checkpoint.")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_MAX)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=EPOCHS, eta_min=1e-6
+    )
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(
     #     optimizer,
     #     max_lr=LR,
@@ -547,14 +565,14 @@ def do_train():
     #     div_factor=5.0,  # start LR = 1e-5
     #     final_div_factor=5.0,  # End LR = 1e-5
     # )
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=[2e-4, 2e-4, 3e-4, 2.5e-4],
-        total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
-        pct_start=0.2,
-        anneal_strategy="cos",
-        final_div_factor=20,  # final LR ≈ max/20 ≈ 1e-5
-    )
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer,
+    #     max_lr=[2e-4, 2e-4, 3e-4, 2.5e-4],
+    #     total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
+    #     pct_start=0.2,
+    #     anneal_strategy="cos",
+    #     final_div_factor=20,  # final LR ≈ max/20 ≈ 1e-5
+    # )
     if checkpoint is not None and resume_training:
         print("Loading scheduler state from checkpoint.")
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -606,22 +624,26 @@ def do_train():
         # optimizer.zero_grad()
 
         for i in bar:
-            matsynth_batch = next(matsynth_train_iter)
+            # matsynth_batch = next(matsynth_train_iter)
             skyrim_batch = next(skyrim_train_iter)
 
             diffuse_and_normal = torch.cat(
                 [
-                    matsynth_batch["diffuse_and_normal"],
+                    # matsynth_batch["diffuse_and_normal"],
                     skyrim_batch["diffuse_and_normal"],
                 ],
                 dim=0,
             )
             albedo_gt = torch.cat(
-                [matsynth_batch["albedo"], skyrim_batch["albedo"]], dim=0
+                [
+                    # matsynth_batch["albedo"],
+                    skyrim_batch["albedo"]
+                ],
+                dim=0,
             )
             albedo_and_normal_segformer = torch.cat(
                 [
-                    matsynth_batch["albedo_and_normal_segformer"],
+                    # matsynth_batch["albedo_and_normal_segformer"],
                     skyrim_batch["albedo_and_normal_segformer"],
                 ],
                 dim=0,
@@ -693,40 +715,50 @@ def do_train():
             num_samples_saved = 0
 
             for _ in bar:
-                matsynth_batch = next(matsynth_validation_iter)
+                # matsynth_batch = next(matsynth_validation_iter)
                 skyrim_batch = next(skyrim_validation_iter)
 
                 diffuse_and_normal = torch.cat(
                     [
-                        matsynth_batch["diffuse_and_normal"],
+                        # matsynth_batch["diffuse_and_normal"],
                         skyrim_batch["diffuse_and_normal"],
                     ],
                     dim=0,
                 )
                 albedo_and_normal_segformer = torch.cat(
                     [
-                        matsynth_batch["albedo_and_normal_segformer"],
+                        # matsynth_batch["albedo_and_normal_segformer"],
                         skyrim_batch["albedo_and_normal_segformer"],
                     ],
                     dim=0,
                 )
                 albedo_gt = torch.cat(
-                    [matsynth_batch["albedo"], skyrim_batch["albedo"]], dim=0
+                    [
+                        # matsynth_batch["albedo"],
+                        skyrim_batch["albedo"]
+                    ],
+                    dim=0,
                 )
                 normal = torch.cat(
-                    [matsynth_batch["normal"], skyrim_batch["normal"]], dim=0
+                    [
+                        # matsynth_batch["normal"],
+                        skyrim_batch["normal"]
+                    ],
+                    dim=0,
                 )
-                names = list(matsynth_batch["name"]) + list(skyrim_batch["name"])
+                # names = list(matsynth_batch["name"]) + list(skyrim_batch["name"])
+                names = skyrim_batch["name"]
+
                 original_diffuse = torch.cat(
                     [
-                        matsynth_batch["original_diffuse"],
+                        # matsynth_batch["original_diffuse"],
                         skyrim_batch["original_diffuse"],
                     ],
                     dim=0,
                 )
                 original_normal = torch.cat(
                     [
-                        matsynth_batch["original_normal"],
+                        # matsynth_batch["original_normal"],
                         skyrim_batch["original_normal"],
                     ],
                     dim=0,

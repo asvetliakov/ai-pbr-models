@@ -81,7 +81,9 @@ PHASE = args.phase  # Phase of the training per plan, used for logging and savin
 # Enable TF32 for faster training on Ampere GPUs
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-torch.backends.cudnn.benchmark = True  # Enable for faster training on fixed input sizes
+torch.backends.cudnn.benchmark = (
+    False  # For some reason it may slows down consequent epochs
+)
 
 matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
 skyrim_dir = (BASE_DIR / "../skyrim_processed").resolve()
@@ -1023,8 +1025,8 @@ def do_train():
         val_all_labels = []
         val_all_preds = []
 
-        torch.cuda.synchronize()  # ensure all kernels are done
-        torch.cuda.empty_cache()  # release fragmented blocks
+        # torch.cuda.synchronize()  # ensure all kernels are done
+        # torch.cuda.empty_cache()  # release fragmented blocks
 
     print("Training completed.")
 
