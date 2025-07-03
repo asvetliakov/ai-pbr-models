@@ -128,10 +128,10 @@ skyrim_validation_dataset.all_validation_samples = (
 
 CROP_SIZE = 256
 
-BATCH_SIZE_MATSYNTH = 36
-BATCH_SIZE_SKYRIM = 36
-BATCH_SIZE_VALIDATION_MATSYNTH = 36
-BATCH_SIZE_VALIDATION_SKYRIM = 36
+BATCH_SIZE_MATSYNTH = 16
+BATCH_SIZE_SKYRIM = 16
+BATCH_SIZE_VALIDATION_MATSYNTH = 16
+BATCH_SIZE_VALIDATION_SKYRIM = 16
 
 MATSYNTH_COLOR_AUGMENTATIONS = False
 SKYRIM_PHOTOMETRIC = 0.0
@@ -147,10 +147,10 @@ MIN_SAMPLES_TRAIN = len(
     if BATCH_SIZE_MATSYNTH > BATCH_SIZE_SKYRIM
     else skyrim_train_dataset
 )
-MIN_SAMPLES_VALIDATION = len(matsynth_validation_dataset)
+MIN_SAMPLES_VALIDATION = len(skyrim_validation_dataset)
 STEPS_PER_EPOCH_TRAIN = math.ceil(MIN_SAMPLES_TRAIN / BATCH_SIZE)
 STEPS_PER_EPOCH_VALIDATION = math.ceil(
-    MIN_SAMPLES_VALIDATION / BATCH_SIZE_VALIDATION_MATSYNTH
+    MIN_SAMPLES_VALIDATION / BATCH_SIZE_VALIDATION_SKYRIM
 )
 
 resume_training = args.resume
@@ -469,7 +469,7 @@ skyrim_validation_dataset.set_transform(transform_val_fn)
 # Training loop
 def do_train():
     print(
-        f"Starting training for {EPOCHS} epochs, on {STEPS_PER_EPOCH_TRAIN * BATCH_SIZE} Samples, MatSynth/Skyrim Batch: {BATCH_SIZE_MATSYNTH}/{BATCH_SIZE_SKYRIM}, validation on {MIN_SAMPLES_VALIDATION} MatSynth samples."
+        f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE) * 2} Samples, MatSynth/Skyrim Batch: {BATCH_SIZE_MATSYNTH}/{BATCH_SIZE_SKYRIM}, validation on {MIN_SAMPLES_VALIDATION * 2} samples."
     )
 
     unet_alb, segformer, checkpoint = get_model()
@@ -488,7 +488,7 @@ def do_train():
     matsynth_validation_loader = DataLoader(
         matsynth_validation_dataset,  # type: ignore
         batch_size=BATCH_SIZE_VALIDATION_MATSYNTH,
-        num_workers=6,
+        num_workers=3,
         shuffle=False,
         pin_memory=True,
         persistent_workers=True,
@@ -508,7 +508,7 @@ def do_train():
         skyrim_validation_dataset,
         batch_size=BATCH_SIZE_VALIDATION_SKYRIM,
         shuffle=False,
-        num_workers=6,
+        num_workers=3,
         pin_memory=True,
         persistent_workers=True,
     )
@@ -635,12 +635,15 @@ def do_train():
 
             optimizer.zero_grad()
             with torch.no_grad():
-                #  Get Segoformer ouput for FiLM
-                seg_feats = (
-                    segformer(albedo_and_normal_segformer, output_hidden_states=True)
-                    .hidden_states[-1]
-                    .detach()
-                )
+                with autocast(device_type=device.type):
+                    #  Get Segoformer ouput for FiLM
+                    seg_feats = (
+                        segformer(
+                            albedo_and_normal_segformer, output_hidden_states=True
+                        )
+                        .hidden_states[-1]
+                        .detach()
+                    )
 
             with autocast(device_type=device.type):
                 # Get UNet-Albedo prediction
@@ -713,7 +716,7 @@ def do_train():
                 normal = torch.cat(
                     [matsynth_batch["normal"], skyrim_batch["normal"]], dim=0
                 )
-                names = torch.cat([matsynth_batch["name"], skyrim_batch["name"]], dim=0)
+                names = list(matsynth_batch["name"]) + list(skyrim_batch["name"])
                 original_diffuse = torch.cat(
                     [
                         matsynth_batch["original_diffuse"],
@@ -738,12 +741,14 @@ def do_train():
                 original_diffuse = original_diffuse.to(device, non_blocking=True)
                 original_normal = original_normal.to(device, non_blocking=True)
 
-                seg_feats = (
-                    segformer(albedo_and_normal_segformer, output_hidden_states=True)
-                    .hidden_states[-1]
-                    .detach()
-                )
                 with autocast(device_type=device.type):
+                    seg_feats = (
+                        segformer(
+                            albedo_and_normal_segformer, output_hidden_states=True
+                        )
+                        .hidden_states[-1]
+                        .detach()
+                    )
                     albedo_pred = unet_alb(diffuse_and_normal, seg_feats)
 
                 calculate_unet_albedo_loss(
