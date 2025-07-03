@@ -14,6 +14,7 @@ from tqdm import tqdm
 from torchvision.utils import save_image
 from torchvision.transforms import functional as TF
 from torchmetrics import functional as FM
+import warnings
 from transformers.utils.constants import (
     IMAGENET_STANDARD_MEAN,
     IMAGENET_STANDARD_STD,
@@ -31,6 +32,11 @@ from segformer_6ch import create_segformer
 
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
+
+
+# Supress VGG warnings from lpips
+warnings.filterwarnings("ignore", category=UserWarning, module="torchvision.models")
+
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -360,6 +366,8 @@ def transform_val_fn(example):
 
 
 _lpips = lpips.LPIPS(net="vgg").to(device).eval()
+for p in _lpips.parameters():
+    p.requires_grad = False
 
 
 def to_lpips_space(x: torch.Tensor) -> torch.Tensor:
@@ -367,10 +375,9 @@ def to_lpips_space(x: torch.Tensor) -> torch.Tensor:
     x: (B,3,H,W) in [0,1]
     returns: (B,3,H,W) in [-1,1]
     """
-    return x.mul_(2).sub_(1)
+    return x * 2 - 1
 
 
-@torch.no_grad()
 def lpips_batch(pred_rgb: torch.Tensor, target_rgb: torch.Tensor) -> torch.Tensor:
     # remap into LPIPS’s expected [-1,1]
     p = to_lpips_space(pred_rgb)
@@ -414,10 +421,7 @@ def calculate_unet_albedo_loss(
     ecpoch_data["unet_albedo"][key]["ssim_loss"] += ssim_loss.item()
 
     # LPIPS
-    with autocast(device_type=device.type, enabled=False):
-        lpips = lpips_batch(
-            albedo_pred.clamp(0, 1).float(), albedo_gt.clamp(0, 1).float()
-        )
+    lpips = lpips_batch(albedo_pred.clamp(0, 1).float(), albedo_gt.clamp(0, 1).float())
     lpips = torch.nan_to_num(lpips, nan=0.0).float()
     ecpoch_data["unet_albedo"][key]["lpips"] += lpips.item()
 
