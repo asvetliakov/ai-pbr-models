@@ -11,6 +11,7 @@ def create_segformer(
     device: torch.device,
     lora=True,
     base_model_state: Optional[dict] = None,
+    frozen=False,
 ) -> PeftModel | SegformerForSemanticSegmentation:
     logging.set_verbosity_error()  # Suppress warnings from transformers
     model = SegformerForSemanticSegmentation.from_pretrained(
@@ -79,5 +80,9 @@ def create_segformer(
             # attach the shim
 
         model.forward = MethodType(segformer_peft_forward, model)
+
+    if frozen:
+        for param in model.parameters():
+            param.requires_grad = False
 
     return model  # type: ignore
