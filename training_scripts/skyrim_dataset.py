@@ -2,15 +2,10 @@ import seed
 import os
 from PIL import Image
 from pathlib import Path
-import json
 import torch
 import random
 from torch.utils.data import Dataset
 from typing import Callable, Optional
-
-BASE_DIR = Path(__file__).resolve().parent
-CACHE_FILE_PBR = (BASE_DIR / "skyrim_cache_pbr.json").resolve()
-CACHE_FILE_ALL = (BASE_DIR / "skyrim_cache_all.json").resolve()
 
 
 class SkyrimDataset(Dataset):
@@ -21,6 +16,8 @@ class SkyrimDataset(Dataset):
         split: str = "train",
         load_non_pbr=False,
         skip_init=False,
+        ignore_without_parallax=False,
+        matsynth_metallic_dir: Optional[str] = None,
     ):
         self.skyrim_input_dir = os.path.join(skyrim_dir)
         self.transform: Optional[Callable] = None
@@ -34,50 +31,60 @@ class SkyrimDataset(Dataset):
 
         all_samples = []
 
-        if load_non_pbr and CACHE_FILE_ALL.exists():
-            with open(CACHE_FILE_ALL, "r") as f:
-                all_samples = json.load(f)
-        elif not load_non_pbr and CACHE_FILE_PBR.exists():
-            with open(CACHE_FILE_PBR, "r") as f:
-                all_samples = json.load(f)
-        else:
-            glob = "**/*_diffuse.png" if load_non_pbr else "**/*_basecolor.png"
+        glob = "**/*_diffuse.png" if load_non_pbr else "**/*_basecolor.png"
 
-            for sample in Path(self.skyrim_input_dir).glob(glob):
-                # Use relative path for sample name
-                rel_path = (
-                    str(sample.parent.relative_to(self.skyrim_input_dir))
-                    .replace("\\", "_")
-                    .replace("/", "_")
-                    .replace(" ", "_")
-                )
-                base_name = (
-                    sample.stem.replace("_diffuse", "")
-                    if load_non_pbr
-                    else sample.stem.replace("_basecolor", "")
-                )
-                name = rel_path + "_" + base_name
-                path = sample.absolute()
+        for sample in Path(self.skyrim_input_dir).glob(glob):
+            # Use relative path for sample name
+            rel_path = (
+                str(sample.parent.relative_to(self.skyrim_input_dir))
+                .replace("\\", "_")
+                .replace("/", "_")
+                .replace(" ", "_")
+            )
+            base_name = (
+                sample.stem.replace("_diffuse", "")
+                if load_non_pbr
+                else sample.stem.replace("_basecolor", "")
+            )
+            name = rel_path + "_" + base_name
+            path = sample.absolute()
+            parallax_path = path.with_name(base_name + "_parallax.png")
+
+            if ignore_without_parallax and not parallax_path.exists():
+                continue
+
+            sample = {
+                "source": "skyrim",
+                "name": name,
+                "pbr": path.with_name(base_name + "_basecolor.png").exists(),
+                "diffuse": str(path.with_name(base_name + "_diffuse.png")),
+                "basecolor": str(path.with_name(base_name + "_basecolor.png")),
+                "normal": str(path.with_name(base_name + "_normal.png")),
+                "ao": str(path.with_name(base_name + "_ao.png")),
+                "parallax": str(path.with_name(base_name + "_parallax.png")),
+                "metallic": str(path.with_name(base_name + "_metallic.png")),
+                "roughness": str(path.with_name(base_name + "_roughness.png")),
+            }
+            all_samples.append(sample)
+
+        if matsynth_metallic_dir:
+            metallic_path = Path(matsynth_metallic_dir)
+            for metadata in metallic_path.glob("**/*.json"):
+                name = metadata.stem
+                path = metadata.absolute()
                 sample = {
-                    "source": "skyrim",
+                    "source": "matsynth",
                     "name": name,
-                    "pbr": path.with_name(base_name + "_basecolor.png").exists(),
-                    "diffuse": str(path.with_name(base_name + "_diffuse.png")),
-                    "basecolor": str(path.with_name(base_name + "_basecolor.png")),
-                    "normal": str(path.with_name(base_name + "_normal.png")),
-                    "ao": str(path.with_name(base_name + "_ao.png")),
-                    "parallax": str(path.with_name(base_name + "_parallax.png")),
-                    "metallic": str(path.with_name(base_name + "_metallic.png")),
-                    "roughness": str(path.with_name(base_name + "_roughness.png")),
+                    "pbr": True,
+                    "diffuse": str(path.with_name(name + "_diffuse.png")),
+                    "basecolor": str(path.with_name(name + "_basecolor.png")),
+                    "normal": str(path.with_name(name + "_normal.png")),
+                    "ao": str(path.with_name(name + "_ao.png")),
+                    "parallax": str(path.with_name(name + "_parallax.png")),
+                    "metallic": str(path.with_name(name + "_metallic.png")),
+                    "roughness": str(path.with_name(name + "_roughness.png")),
                 }
-                all_samples.append(sample)
-            # Save the samples to cache
-            if load_non_pbr:
-                with open(CACHE_FILE_ALL, "w") as f:
-                    json.dump(all_samples, f, indent=4)
-            else:
-                with open(CACHE_FILE_PBR, "w") as f:
-                    json.dump(all_samples, f, indent=4)
+            all_samples.append(sample)
 
         n_val = max(1, int(0.1 * len(all_samples)))
         random.shuffle(all_samples)

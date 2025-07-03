@@ -9,9 +9,6 @@ import numpy as np
 from torch.utils.data import Dataset
 from typing import Callable, Optional, Tuple
 
-BASE_DIR = Path(__file__).resolve().parent
-CACHE_FILE = (BASE_DIR / "matsynth_cache.json").resolve()
-
 
 def normalize_normal_map(normal: Image.Image) -> Image.Image:
     """
@@ -91,22 +88,14 @@ class SimpleImageDataset(Dataset):
             return
 
         sample_names_per_category = {name: [] for name in self.CLASS_LIST}
-        if CACHE_FILE.exists():
-            with open(CACHE_FILE, "r") as f:
-                sample_names_per_category = json.load(f)
-        else:
-            for metdata in Path(self.matsynth_input_dir).glob("**/*.json"):
-                category_name = metdata.parent.name
-                name = metdata.stem
-                category_idx = self.CLASS_LIST_IDX_MAPPING.get(category_name, None)
-                if category_idx is None:
-                    print(f"Warning: Category '{category_name}' not in CLASS_LIST.")
+        for metdata in Path(self.matsynth_input_dir).glob("**/*.json"):
+            category_name = metdata.parent.name
+            name = metdata.stem
+            category_idx = self.CLASS_LIST_IDX_MAPPING.get(category_name, None)
+            if category_idx is None:
+                print(f"Warning: Category '{category_name}' not in CLASS_LIST.")
 
-                sample_names_per_category[category_name].append(name)
-
-            # Save the sample names to cache
-            with open(CACHE_FILE, "w") as f:
-                json.dump(sample_names_per_category, f, indent=4)
+            sample_names_per_category[category_name].append(name)
 
         for category, names in sample_names_per_category.items():
             names = sorted(names)
