@@ -113,7 +113,7 @@ train_sampler = WeightedRandomSampler(
 skyrim_train_dataset = SkyrimDataset(
     skyrim_dir=str(skyrim_dir),
     split="train",
-    load_non_pbr=True,
+    load_non_pbr=False,
 )
 
 skyrim_validation_dataset = SkyrimDataset(
