@@ -553,9 +553,10 @@ def do_train():
         print("Loading optimizer state from checkpoint.")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=1e-6
-    )
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #     optimizer, T_max=EPOCHS, eta_min=1e-6
+    # )
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(
     #     optimizer,
     #     max_lr=LR,
@@ -694,7 +695,7 @@ def do_train():
 
             scaler.step(optimizer)
             scaler.update()
-            scheduler.step()
+            # scheduler.step()
 
             # if (i + 1) % accum_steps == 0 or (i + 1) == len(train_loader):
             #     scaler.step(optimizer)
@@ -838,6 +839,7 @@ def do_train():
 
         unet_albedo_total_val_loss = calculate_avg(epoch_data, key="validation")
 
+        scheduler.step()
         print(json.dumps(epoch_data, indent=4))
 
         # Save checkopoint after each epoch
