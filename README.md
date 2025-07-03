@@ -63,22 +63,14 @@ model.head_metal[0].bias.data.fill_(b0)          # 1×1 conv bias
 bce = torch.nn.BCEWithLogitsLoss(pos_weight = neg/pos)
 ```
 
-## 5. Curriculum snapshot
-
-| Block | SegFormer       | Albedo               | Maps                       |
-| ----- | --------------- | -------------------- | -------------------------- |
-| Early | S0–S1 (256)     | A1 (256)             | —                          |
-| Mid   | S2–S3 (512-768) | A2 (512-768)         | M-pre (768-1 K) → M0 (1 K) |
-| Late  | S5 (2 K)        | **A3-default (2 K)** | M1 (2 K per-head)          |
-
-## 6. Augmentation key
+## 5. Augmentation key
 
 -   Global safe – h/v flip, 90° rot (all phases)
 -   Colour-jitter – ±5 % hue/sat (MatSynth only)
 -   Composite mosaics – MatSynth only, % per table
 -   SkyPhotometric(p=0.6) – light tint, γ, grain; p = 0.5 in hi-res stages
 
-## 7. Implementation notes
+## 6. Implementation notes
 
 ```python
 # ❶  Weight-transfer Maps ⇐ Albedo
@@ -96,7 +88,7 @@ out = maps(maps_in, segfeat)
 
 ```
 
-## 8. MatSynth category hygiene
+## 7. MatSynth category hygiene
 
 | Category                                                 | Action & Reason                                                                          |
 | -------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -108,7 +100,7 @@ out = maps(maps_in, segfeat)
 | **misc**                                                 | Contains heterogeneous, often modern designs → **drop**.                                 |
 | **ceramic, fabric, ground, leather, metal, wood, stone** | **Keep**. Add `fur` if you have ≥ 100 samples.                                           |
 
-## 9. Texture augmentation table
+## 8. Texture augmentation table
 
 | Category                       | **Safe for ALL domains**<br>(apply blindly) | **Category-Selective**<br>(only if label is known or confidence > 0.8) | **Exclude / Never**                |
 | ------------------------------ | ------------------------------------------- | ---------------------------------------------------------------------- | ---------------------------------- |
