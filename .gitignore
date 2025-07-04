@@ -6,7 +6,10 @@ __pycache__
 segformer_sample_test
 test_output
 skyrim_samples
+skyrim_samples_for_maps
 skyrim_processed
+skyrim_processed_for_maps
 skyrim_cache_all.json
 skyrim_cache_pbr.json
 matsynth_cache.json
+temp

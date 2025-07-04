@@ -74,8 +74,8 @@ args = parser.parse_args()
 print(f"Training phase: {args.phase}")
 
 # HYPER_PARAMETERS
-EPOCHS = 8  # Number of epochs to train
-# LR = 5e-7  # Learning rate for the optimizer
+EPOCHS = 10  # Number of epochs to train
+# LR = 1e-6  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
 PHASE = args.phase  # Phase of the training per plan, used for logging and saving
@@ -87,6 +87,8 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = (
     False  # For some reason it may slows down consequent epochs
 )
+
+VISUAL_SAMPLES_COUNT = 16  # Number of samples to visualize in validation
 
 matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
 skyrim_dir = (BASE_DIR / "../skyrim_processed").resolve()
@@ -149,9 +151,9 @@ def get_model():
             weight_donor_checkpoint["unet_albedo_model_state_dict"], strict=False
         )
 
-        # ! Set metal bias # to a value that corresponds to 6% metal pixels in the dataset to prevent early collapse
+        # ! Set metal bias # to a value that corresponds to 15% metal pixels in the dataset to prevent early collapse
         # Doing this only on the first init on the first phase. If we're setting weight donor then we're at the first phase
-        p0 = 0.06
+        p0 = 0.15
         b0 = -math.log((1 - p0) / p0)
         with torch.no_grad():
             torch.nn.init.constant_(unet_maps.head_metal[0].bias, b0)  # type: ignore
@@ -426,7 +428,7 @@ def calculate_unet_maps_loss(
         }
 
     w_rough = 1.0  # Weight for roughness loss
-    w_metal = 2.0  # Weight for metallic loss
+    w_metal = 1.0  # Weight for metallic loss
     w_ao = 1.0  # Weight for AO loss
     w_height = 1.0  # Weight for height loss
 
@@ -463,8 +465,10 @@ def calculate_unet_maps_loss(
     # Metal
     metal_positive = metallic_gt.sum().float()
     metal_negative = (metallic_gt.numel() - metal_positive).float()
-    metal_weights = ((metal_negative + 1e-6) / (metal_positive + 1e-6)).clamp(
-        min=1.0, max=20.0
+    metal_weights = (
+        ((metal_negative + 1e-6) / (metal_positive + 1e-6))
+        .clamp(min=1.0, max=20.0)
+        .to(device)
     )
     loss_metal = F.binary_cross_entropy_with_logits(
         metallic_pred, metallic_gt, pos_weight=metal_weights, reduction="mean"
@@ -510,7 +514,7 @@ def calculate_unet_maps_loss(
     # [h0 - h1, h1 - h2, ..., hN-1 - hN]
     dy = torch.abs(height_pred[..., :-1, :] - height_pred[..., 1:, :]).mean().float()
     tv = dx + dy
-    grad_penalty = 0.01 * tv
+    grad_penalty = 0.005 * tv
     ecpoch_data["unet_maps"][key]["height_tv_penalty"] += grad_penalty.item()
 
     loss_height = l1_height + grad_penalty
@@ -587,6 +591,9 @@ def do_train():
     # for param in unet_maps.parameters():
     #     param.requires_grad = False
 
+    # for param in unet_maps.head_rough.parameters():
+    #     param.requires_grad = True
+
     # for param in unet_maps.out.parameters():
     #     param.requires_grad = True
 
@@ -618,86 +625,52 @@ def do_train():
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
     # ❶ encoder with LLRD (0.8^depth)
-    # ---------- LR setup ----------
-    base_enc_lr = 1e-5  # as in the table
-    base_dec_lr = 5e-5
+    base_enc_lr = 1e-5
+    base_dec_lr = 5e-4
 
-    enc_groups = []
+    param_groups = []
     depth = len(unet_maps.unet.encoder)
     for i, block in enumerate(unet_maps.unet.encoder):
         lr_i = base_enc_lr * (0.8 ** (depth - i - 1))
-        enc_groups.append(
-            dict(
-                params=block.parameters(),
-                lr=lr_i,
-                weight_decay=WD,
-            )
+        param_groups.append(
+            {
+                "params": block.parameters(),
+                "lr": lr_i,
+                "weight_decay": WD,
+            }
         )
 
-    dec_groups = [
-        dict(
-            params=unet_maps.unet.decoder.parameters(),
-            lr=base_dec_lr,
-        ),
-        dict(
-            params=unet_maps.unet.film.parameters(),  # type: ignore
-            lr=base_dec_lr,
-        ),
-        dict(
-            params=unet_maps.head_rough.parameters(),
-            lr=base_dec_lr,
-        ),
-        dict(
-            params=unet_maps.head_metal.parameters(),
-            lr=base_dec_lr,
-        ),
-        dict(
-            params=unet_maps.head_ao.parameters(),
-            lr=base_dec_lr,
-        ),
-        dict(
-            params=unet_maps.head_h.parameters(),
-            lr=base_dec_lr,
-        ),
+    # decoder + film + each head all at base_dec_lr
+    param_groups += [
+        {
+            "params": unet_maps.unet.decoder.parameters(),
+            "lr": base_dec_lr,
+            "weight_decay": WD,
+        },
+        {"params": unet_maps.unet.film.parameters(), "lr": base_dec_lr, "weight_decay": WD},  # type: ignore
+        {"params": unet_maps.head_rough.parameters(), "lr": base_dec_lr},
+        {"params": unet_maps.head_metal.parameters(), "lr": base_dec_lr},
+        {"params": unet_maps.head_ao.parameters(), "lr": base_dec_lr},
+        {"params": unet_maps.head_h.parameters(), "lr": base_dec_lr},
     ]
 
     # trainable = [p for p in unet_maps.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        # trainable,
-        enc_groups + dec_groups,
-        # filter(lambda p: p.requires_grad, unet_alb.parameters()),
+        param_groups,
         # lr=LR,
         # weight_decay=WD,
-        # [enc_params, dec_params, film_params, head_params],
         betas=(0.9, 0.999),
         eps=1e-8,
-        weight_decay=WD,
+        # weight_decay=WD,
     )
     if checkpoint is not None and resume_training:
         print("Loading optimizer state from checkpoint.")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=1e-6
+        optimizer, T_max=EPOCHS * STEPS_PER_EPOCH_TRAIN, eta_min=0.0
     )
     # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #     optimizer,
-    #     max_lr=LR,
-    #     total_steps=EPOCHS * len(train_loader),
-    #     # 15% warm-up 85% cooldown
-    #     pct_start=0.15,
-    #     div_factor=5.0,  # start LR = 1e-5
-    #     final_div_factor=5.0,  # End LR = 1e-5
-    # )
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #     optimizer,
-    #     max_lr=[2e-4, 2e-4, 3e-4, 2.5e-4],
-    #     total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
-    #     pct_start=0.2,
-    #     anneal_strategy="cos",
-    #     final_div_factor=20,  # final LR ≈ max/20 ≈ 1e-5
-    # )
     if checkpoint is not None and resume_training:
         print("Loading scheduler state from checkpoint.")
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -827,7 +800,7 @@ def do_train():
 
             scaler.step(optimizer)
             scaler.update()
-            # scheduler.step()
+            scheduler.step()
 
         calculate_avg(epoch_data, key="train")
 
@@ -918,7 +891,10 @@ def do_train():
 
                 epoch_data["validation"]["batch_count"] += 1
 
-                if num_samples_saved < 64:
+                if (
+                    VISUAL_SAMPLES_COUNT > 0
+                    and num_samples_saved < VISUAL_SAMPLES_COUNT
+                ):
                     for (
                         sample_diffuse,
                         sample_normal,
@@ -994,7 +970,7 @@ def do_train():
 
         unet_total_val_loss = calculate_avg(epoch_data, key="validation")
 
-        scheduler.step()
+        # scheduler.step()
         print(json.dumps(epoch_data, indent=4))
 
         # Save checkopoint after each epoch
