@@ -31,6 +31,7 @@ from segformer_6ch import create_segformer
 
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
+import kornia as K
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -75,7 +76,7 @@ print(f"Training phase: {args.phase}")
 
 # HYPER_PARAMETERS
 EPOCHS = 6  # Number of epochs to train
-LR = 1e-6  # Learning rate for the optimizer
+# LR = 1e-3  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
 PHASE = args.phase  # Phase of the training per plan, used for logging and saving
@@ -404,6 +405,41 @@ def transform_val_fn(example):
     }
 
 
+def gradient_difference_loss(pred, gt):
+    # pred, gt: (B,1,H,W)
+    # compute forward-differences
+    dh_pred_x = torch.abs(pred[:, :, 1:, :] - pred[:, :, :-1, :])
+    dh_pred_y = torch.abs(pred[:, :, :, 1:] - pred[:, :, :, :-1])
+    dh_gt_x = torch.abs(gt[:, :, 1:, :] - gt[:, :, :-1, :])
+    dh_gt_y = torch.abs(gt[:, :, :, 1:] - gt[:, :, :, :-1])
+    return (
+        F.l1_loss(dh_pred_x, dh_gt_x).float() + F.l1_loss(dh_pred_y, dh_gt_y).float()
+    ) * 0.5
+
+
+def edge_aware_sobel_loss(pred, gt):
+    grads_pred = K.filters.spatial_gradient(pred, mode="sobel", order=1)
+    grads_gt = K.filters.spatial_gradient(gt, mode="sobel", order=1)
+    # collapse gradient channels to magnitude
+    # grads_pred: (B,1,2,H,W) → (B,1,H,W)
+    gx_pred, gy_pred = grads_pred.unbind(dim=2)
+    sobel_pred = gx_pred.abs() + gy_pred.abs()
+
+    gx_gt, gy_gt = grads_gt.unbind(dim=2)
+    sobel_gt = gx_gt.abs() + gy_gt.abs()
+
+    loss_edge = F.l1_loss(sobel_pred, sobel_gt).float()
+    return loss_edge
+
+
+def dice_loss(pred, gt, eps=1e-6):
+    # pred, gt in [0,1], shape (B,1,H,W)
+    intersection = (pred * gt).sum(dim=(1, 2, 3))
+    union = pred.sum(dim=(1, 2, 3)) + gt.sum(dim=(1, 2, 3))
+    dice_score = (2 * intersection + eps) / (union + eps)
+    return 1.0 - dice_score.mean()
+
+
 def calculate_unet_maps_loss(
     roughness_pred: torch.Tensor,
     metallic_pred: torch.Tensor,
@@ -424,10 +460,17 @@ def calculate_unet_maps_loss(
             "rough_l1_loss": 0.0,
             "rought_ssim_loss": 0.0,
             "rough_loss": 0.0,
+            "metal_l1_loss": 0.0,
+            "metal_edge_loss": 0.0,
+            "metal_dice_loss": 0.0,
             "metal_loss": 0.0,
+            "ao_l1_loss": 0.0,
+            "ao_edge_loss": 0.0,
             "ao_loss": 0.0,
             "height_l1_loss": 0.0,
-            "height_tv_penalty": 0.0,
+            "height_tv": 0.0,
+            "height_ssim_loss": 0.0,
+            "height_grad_diff_loss": 0.0,
             "height_loss": 0.0,
             "total_loss": 0.0,
         }
@@ -437,16 +480,6 @@ def calculate_unet_maps_loss(
     w_ao = 1.0  # Weight for AO loss
     w_height = 1.0  # Weight for height loss
 
-    # Calculate masks
-    # mask_all = torch.ones_like(roughness_gt, dtype=torch.bool)  # (B, 1, H, W)
-    # mask_metal = (
-    #     (masks == train_dataset.METAL_IDX).unsqueeze(1).to(device)
-    # )  # (B, 1, H, W)
-
-    # Roughness, since every pixel is important, we use a mask of ones
-    # l1_rough = masked_l1(
-    #     pred=roughness_pred, target=roughness_gt, material_mask=mask_all
-    # )
     if w_rough != 0.0:
         l1_rough = F.l1_loss(roughness_pred, roughness_gt).float()
 
@@ -472,48 +505,49 @@ def calculate_unet_maps_loss(
 
     # Metal
     if w_metal != 0.0:
-        metal_positive = metallic_gt.sum().float()
-        metal_negative = (metallic_gt.numel() - metal_positive).float()
-        metal_weights = (
-            ((metal_negative + 1e-6) / (metal_positive + 1e-6))
-            .clamp(min=1.0, max=16.0)
-            .to(device)
-        )
-        loss_metal = F.binary_cross_entropy_with_logits(
-            metallic_pred, metallic_gt, pos_weight=metal_weights, reduction="mean"
+        l1_metal_loss = F.l1_loss(metallic_pred, metallic_gt).float()
+        ecpoch_data["unet_maps"][key]["metal_l1_loss"] += l1_metal_loss.item()
+
+        edge_metal_loss = edge_aware_sobel_loss(metallic_pred, metallic_gt)
+        ecpoch_data["unet_maps"][key]["metal_edge_loss"] += edge_metal_loss.item()
+
+        dice_metal_loss = dice_loss(metallic_pred, metallic_gt).float()
+        ecpoch_data["unet_maps"][key]["metal_dice_loss"] += dice_metal_loss.item()
+
+        # metal_positive = metallic_gt.sum().float()
+        # metal_negative = (metallic_gt.numel() - metal_positive).float()
+        # metal_weights = (
+        #     ((metal_negative + 1e-6) / (metal_positive + 1e-6))
+        #     .clamp(min=1.0, max=16.0)
+        #     .to(device)
+        # )
+        # loss_metal = F.binary_cross_entropy_with_logits(
+        #     metallic_pred, metallic_gt, pos_weight=metal_weights, reduction="mean"
+        # )
+        loss_metal = (
+            l1_metal_loss
+            + 0.15 * l1_metal_loss  # extra snap weight
+            + 0.05 * edge_metal_loss
+            + 0.5 * dice_metal_loss
         )
     else:
         loss_metal = torch.tensor(0.0, device=device)
 
     loss_metal = loss_metal * w_metal  # Apply weight
 
-    # metal_ratio_raw = (metal_negative / metal_positive).sqrt().clamp(max=20.0)
-    # metal_normaliser = (metal_ratio_raw * metal_positive + metal_negative) / (
-    #     metal_positive + metal_negative
-    # )
-    # metal_weight = metal_ratio_raw / metal_normaliser
-    # non_metal_weight = 1.0 / metal_normaliser
-    # weight_map = torch.where(metallic_gt > 0.5, metal_weight, non_metal_weight)
-
-    # loss_metal = F.binary_cross_entropy_with_logits(
-    #     metallic_pred, metallic_gt, weight=weight_map, reduction="mean"
-    # )
-
-    # loss_metal = F.binary_cross_entropy_with_logits(
-    #     metallic_pred,
-    #     metallic_gt,
-    #     weight=mask_metal,  # Zeros out non-metal regions
-    #     reduction="sum",
-    # )
-    # loss_metal = (
-    #     loss_metal / mask_metal.sum().clamp(min=1.0)  # Avoid division by zero
-    # ).float()
     ecpoch_data["unet_maps"][key]["metal_loss"] += loss_metal.item()
 
     # AO, since every pixel is important, we use a mask of ones
     # loss_ao = masked_l1(ao_pred, ao_gt, material_mask=mask_all)
     if w_ao != 0.0:
-        loss_ao = F.l1_loss(ao_pred, ao_gt).float()
+        loss_ao_l1 = F.l1_loss(ao_pred, ao_gt).float()
+        ecpoch_data["unet_maps"][key]["ao_l1_loss"] += loss_ao_l1.item()
+
+        # Sobel gradient for AO
+        loss_edge = edge_aware_sobel_loss(ao_pred, ao_gt)
+        ecpoch_data["unet_maps"][key]["ao_edge_loss"] += loss_edge.item()
+
+        loss_ao = loss_ao_l1 + 0.15 * loss_edge
     else:
         loss_ao = torch.tensor(0.0, device=device)
 
@@ -533,18 +567,38 @@ def calculate_unet_maps_loss(
             torch.abs(height_pred[..., :-1, :] - height_pred[..., 1:, :]).mean().float()
         )
         tv = dx + dy
-        grad_penalty = 0.005 * tv
-        ecpoch_data["unet_maps"][key]["height_tv_penalty"] += grad_penalty.item()
+        ecpoch_data["unet_maps"][key]["height_tv"] += tv.item()
 
-        loss_height = l1_height + grad_penalty
+        # Gradient difference loss
+        height_grad_diff_loss = gradient_difference_loss(height_pred, height_gt)
+        ecpoch_data["unet_maps"][key][
+            "height_grad_diff_loss"
+        ] += height_grad_diff_loss.item()
+
+        # SSIM loss for height
+        ssim_height = FM.structural_similarity_index_measure(
+            height_pred.clamp(0, 1).float(),
+            height_gt.clamp(0, 1).float(),
+            data_range=1.0,
+        )
+        if isinstance(ssim_height, tuple):
+            ssim_height = ssim_height[0]
+        ssim_height = torch.nan_to_num(ssim_height, nan=1.0).float()
+        height_ssim_loss = (1 - ssim_height).float()
+        ecpoch_data["unet_maps"][key]["height_ssim_loss"] += height_ssim_loss.item()
+
+        loss_height = (
+            l1_height
+            + 1.0 * height_grad_diff_loss
+            + 0.005 * tv
+            + 0.1 * height_ssim_loss
+        )
     else:
         loss_height = torch.tensor(0.0, device=device)
 
-    loss_height = loss_height * w_height  # Apply weight
-    # Since every pixel is important, we use a mask of ones
+    loss_height = loss_height * w_height
     ecpoch_data["unet_maps"][key]["height_loss"] += loss_height.item()
 
-    # loss_total = (loss_rough + loss_metal + loss_ao + loss_height) / 4.0
     loss_total = (loss_rough + loss_metal + loss_ao + loss_height) / (
         w_rough + w_metal + w_ao + w_height
     )
@@ -565,21 +619,46 @@ def calculate_avg(epoch_data, key="train"):
     epoch_data["unet_maps"][key]["rough_loss"] = (
         epoch_data["unet_maps"][key]["rough_loss"] / total_batches
     )
+
+    epoch_data["unet_maps"][key]["metal_l1_loss"] = (
+        epoch_data["unet_maps"][key]["metal_l1_loss"] / total_batches
+    )
+    epoch_data["unet_maps"][key]["metal_edge_loss"] = (
+        epoch_data["unet_maps"][key]["metal_edge_loss"] / total_batches
+    )
+    epoch_data["unet_maps"][key]["metal_dice_loss"] = (
+        epoch_data["unet_maps"][key]["metal_dice_loss"] / total_batches
+    )
     epoch_data["unet_maps"][key]["metal_loss"] = (
         epoch_data["unet_maps"][key]["metal_loss"] / total_batches
+    )
+
+    epoch_data["unet_maps"][key]["ao_l1_loss"] = (
+        epoch_data["unet_maps"][key]["ao_l1_loss"] / total_batches
+    )
+    epoch_data["unet_maps"][key]["ao_edge_loss"] = (
+        epoch_data["unet_maps"][key]["ao_edge_loss"] / total_batches
     )
     epoch_data["unet_maps"][key]["ao_loss"] = (
         epoch_data["unet_maps"][key]["ao_loss"] / total_batches
     )
+
     epoch_data["unet_maps"][key]["height_l1_loss"] = (
         epoch_data["unet_maps"][key]["height_l1_loss"] / total_batches
     )
-    epoch_data["unet_maps"][key]["height_tv_penalty"] = (
-        epoch_data["unet_maps"][key]["height_tv_penalty"] / total_batches
+    epoch_data["unet_maps"][key]["height_tv"] = (
+        epoch_data["unet_maps"][key]["height_tv"] / total_batches
+    )
+    epoch_data["unet_maps"][key]["height_ssim_loss"] = (
+        epoch_data["unet_maps"][key]["height_ssim_loss"] / total_batches
+    )
+    epoch_data["unet_maps"][key]["height_grad_diff_loss"] = (
+        epoch_data["unet_maps"][key]["height_grad_diff_loss"] / total_batches
     )
     epoch_data["unet_maps"][key]["height_loss"] = (
         epoch_data["unet_maps"][key]["height_loss"] / total_batches
     )
+
     epoch_data["unet_maps"][key]["total_loss"] = (
         epoch_data["unet_maps"][key]["total_loss"] / total_batches
     )
@@ -613,7 +692,7 @@ def do_train():
     # for param in unet_maps.parameters():
     #     param.requires_grad = False
 
-    # for param in unet_maps.head_rough.parameters():
+    # for param in unet_maps.head_h.parameters():
     #     param.requires_grad = True
 
     skyrim_train_loader = DataLoader(
