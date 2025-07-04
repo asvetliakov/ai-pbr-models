@@ -74,8 +74,8 @@ args = parser.parse_args()
 print(f"Training phase: {args.phase}")
 
 # HYPER_PARAMETERS
-EPOCHS = 10  # Number of epochs to train
-# LR = 1e-6  # Learning rate for the optimizer
+EPOCHS = 6  # Number of epochs to train
+LR = 1e-5  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
 PHASE = args.phase  # Phase of the training per plan, used for logging and saving
@@ -91,7 +91,7 @@ torch.backends.cudnn.benchmark = (
 VISUAL_SAMPLES_COUNT = 16  # Number of samples to visualize in validation
 
 matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
-skyrim_dir = (BASE_DIR / "../skyrim_processed").resolve()
+skyrim_dir = (BASE_DIR / "../skyrim_processed_for_maps").resolve()
 
 device = torch.device("cuda")
 
@@ -120,10 +120,10 @@ skyrim_validation_dataset.all_validation_samples = (
     skyrim_train_dataset.all_validation_samples
 )
 
-CROP_SIZE = 1024
+CROP_SIZE = 768
 
-BATCH_SIZE = 4
-BATCH_SIZE_VALIDATION = 4
+BATCH_SIZE = 6
+BATCH_SIZE_VALIDATION = 6
 
 SKYRIM_PHOTOMETRIC = 0.0
 
@@ -257,10 +257,11 @@ def transform_train_fn(example):
     )
     diffuse_and_normal = torch.cat((diffuse, normal), dim=0)
 
-    parallax = TF.to_tensor(parallax)  # type: ignore
     ao = TF.to_tensor(ao)  # type: ignore
     metallic = TF.to_tensor(metallic)  # type: ignore
     roughness = TF.to_tensor(roughness)  # type: ignore
+
+    parallax = TF.to_tensor(parallax) if parallax is not None else torch.zeros_like(ao)
 
     return {
         # Unet-albedo input
@@ -314,11 +315,15 @@ def transform_val_fn(example):
         interpolation=TF.InterpolationMode.LANCZOS,
     )
 
-    parallax = center_crop(
-        parallax,
-        size=(CROP_SIZE, CROP_SIZE),
-        resize_to=None,
-        interpolation=TF.InterpolationMode.BICUBIC,
+    parallax = (
+        center_crop(
+            parallax,
+            size=(CROP_SIZE, CROP_SIZE),
+            resize_to=None,
+            interpolation=TF.InterpolationMode.BICUBIC,
+        )
+        if parallax is not None
+        else None
     )
 
     ao = center_crop(
@@ -366,10 +371,10 @@ def transform_val_fn(example):
     )
     diffuse_and_normal = torch.cat((diffuse, normal), dim=0)
 
-    parallax = TF.to_tensor(parallax)  # type: ignore
     ao = TF.to_tensor(ao)  # type: ignore
     metallic = TF.to_tensor(metallic)  # type: ignore
     roughness = TF.to_tensor(roughness)  # type: ignore
+    parallax = TF.to_tensor(parallax) if parallax is not None else torch.zeros_like(ao)
 
     diffuse_orig = TF.to_tensor(diffuse_orig)  # type: ignore
     normal_orig = TF.to_tensor(normal_orig)  # type: ignore
@@ -442,37 +447,44 @@ def calculate_unet_maps_loss(
     # l1_rough = masked_l1(
     #     pred=roughness_pred, target=roughness_gt, material_mask=mask_all
     # )
-    l1_rough = F.l1_loss(roughness_pred, roughness_gt).float()
+    if w_rough != 0.0:
+        l1_rough = F.l1_loss(roughness_pred, roughness_gt).float()
 
-    ecpoch_data["unet_maps"][key]["rough_l1_loss"] += l1_rough.item()
-    ssim_rough = FM.structural_similarity_index_measure(
-        roughness_pred.clamp(0, 1).float(),
-        roughness_gt.clamp(0, 1).float(),
-        data_range=1.0,
-    )
-    if isinstance(ssim_rough, tuple):
-        ssim_rough = ssim_rough[0]
-    ssim_rough = torch.nan_to_num(ssim_rough, nan=1.0).float()
+        ecpoch_data["unet_maps"][key]["rough_l1_loss"] += l1_rough.item()
+        ssim_rough = FM.structural_similarity_index_measure(
+            roughness_pred.clamp(0, 1).float(),
+            roughness_gt.clamp(0, 1).float(),
+            data_range=1.0,
+        )
+        if isinstance(ssim_rough, tuple):
+            ssim_rough = ssim_rough[0]
+        ssim_rough = torch.nan_to_num(ssim_rough, nan=1.0).float()
 
-    ssim_rough_loss = (1 - ssim_rough).float()
-    ecpoch_data["unet_maps"][key]["rought_ssim_loss"] += ssim_rough_loss.item()
+        ssim_rough_loss = (1 - ssim_rough).float()
+        ecpoch_data["unet_maps"][key]["rought_ssim_loss"] += ssim_rough_loss.item()
 
-    loss_rough = l1_rough + 0.05 * ssim_rough_loss
+        loss_rough = l1_rough + 0.05 * ssim_rough_loss
+    else:
+        loss_rough = torch.tensor(0.0, device=device)
 
     loss_rough = loss_rough * w_rough  # Apply weight
     ecpoch_data["unet_maps"][key]["rough_loss"] += loss_rough.item()
 
     # Metal
-    metal_positive = metallic_gt.sum().float()
-    metal_negative = (metallic_gt.numel() - metal_positive).float()
-    metal_weights = (
-        ((metal_negative + 1e-6) / (metal_positive + 1e-6))
-        .clamp(min=1.0, max=20.0)
-        .to(device)
-    )
-    loss_metal = F.binary_cross_entropy_with_logits(
-        metallic_pred, metallic_gt, pos_weight=metal_weights, reduction="mean"
-    )
+    if w_metal != 0.0:
+        metal_positive = metallic_gt.sum().float()
+        metal_negative = (metallic_gt.numel() - metal_positive).float()
+        metal_weights = (
+            ((metal_negative + 1e-6) / (metal_positive + 1e-6))
+            .clamp(min=1.0, max=12.0)
+            .to(device)
+        )
+        loss_metal = F.binary_cross_entropy_with_logits(
+            metallic_pred, metallic_gt, pos_weight=metal_weights, reduction="mean"
+        )
+    else:
+        loss_metal = torch.tensor(0.0, device=device)
+
     loss_metal = loss_metal * w_metal  # Apply weight
 
     # metal_ratio_raw = (metal_negative / metal_positive).sqrt().clamp(max=20.0)
@@ -500,24 +512,34 @@ def calculate_unet_maps_loss(
 
     # AO, since every pixel is important, we use a mask of ones
     # loss_ao = masked_l1(ao_pred, ao_gt, material_mask=mask_all)
-    loss_ao = F.l1_loss(ao_pred, ao_gt).float()
+    if w_ao != 0.0:
+        loss_ao = F.l1_loss(ao_pred, ao_gt).float()
+    else:
+        loss_ao = torch.tensor(0.0, device=device)
+
     loss_ao = loss_ao * w_ao  # Apply weight
     ecpoch_data["unet_maps"][key]["ao_loss"] += loss_ao.item()
 
     # Height
     # l1_height = masked_l1(height_pred, height_gt, mask_all)
-    l1_height = F.l1_loss(height_pred, height_gt).float()
-    ecpoch_data["unet_maps"][key]["height_l1_loss"] += l1_height.item()
-    # Gradient total variation (TV) smoothness penalty
-    # [w0 - w1, w1 - w2, ..., wN-1 - wN]
-    dx = torch.abs(height_pred[..., :-1] - height_pred[..., 1:]).mean().float()
-    # [h0 - h1, h1 - h2, ..., hN-1 - hN]
-    dy = torch.abs(height_pred[..., :-1, :] - height_pred[..., 1:, :]).mean().float()
-    tv = dx + dy
-    grad_penalty = 0.005 * tv
-    ecpoch_data["unet_maps"][key]["height_tv_penalty"] += grad_penalty.item()
+    if w_height != 0.0:
+        l1_height = F.l1_loss(height_pred, height_gt).float()
+        ecpoch_data["unet_maps"][key]["height_l1_loss"] += l1_height.item()
+        # Gradient total variation (TV) smoothness penalty
+        # [w0 - w1, w1 - w2, ..., wN-1 - wN]
+        dx = torch.abs(height_pred[..., :-1] - height_pred[..., 1:]).mean().float()
+        # [h0 - h1, h1 - h2, ..., hN-1 - hN]
+        dy = (
+            torch.abs(height_pred[..., :-1, :] - height_pred[..., 1:, :]).mean().float()
+        )
+        tv = dx + dy
+        grad_penalty = 0.01 * tv
+        ecpoch_data["unet_maps"][key]["height_tv_penalty"] += grad_penalty.item()
 
-    loss_height = l1_height + grad_penalty
+        loss_height = l1_height + grad_penalty
+    else:
+        loss_height = torch.tensor(0.0, device=device)
+
     loss_height = loss_height * w_height  # Apply weight
     # Since every pixel is important, we use a mask of ones
     ecpoch_data["unet_maps"][key]["height_loss"] += loss_height.item()
@@ -594,16 +616,10 @@ def do_train():
     # for param in unet_maps.head_rough.parameters():
     #     param.requires_grad = True
 
-    # for param in unet_maps.out.parameters():
-    #     param.requires_grad = True
-
-    # for param in unet_alb.unet.film.parameters():  # type: ignore
-    #     param.requires_grad = True
-
     skyrim_train_loader = DataLoader(
         skyrim_train_dataset,
         batch_size=BATCH_SIZE,
-        num_workers=4,
+        num_workers=8,
         prefetch_factor=2,
         shuffle=True,
         pin_memory=True,
@@ -614,7 +630,7 @@ def do_train():
         skyrim_validation_dataset,
         batch_size=BATCH_SIZE_VALIDATION,
         shuffle=False,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True,
         prefetch_factor=2,
         persistent_workers=True,
@@ -625,8 +641,8 @@ def do_train():
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
     # ❶ encoder with LLRD (0.8^depth)
-    base_enc_lr = 1e-5
-    base_dec_lr = 5e-4
+    base_enc_lr = 2e-5
+    base_dec_lr = 1e-4
 
     param_groups = []
     depth = len(unet_maps.unet.encoder)
@@ -657,20 +673,22 @@ def do_train():
     # trainable = [p for p in unet_maps.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
         param_groups,
+        # trainable,
+        # param_groups,
         # lr=LR,
-        # weight_decay=WD,
+        # weight_decay=0.0,
         betas=(0.9, 0.999),
         eps=1e-8,
-        # weight_decay=WD,
     )
     if checkpoint is not None and resume_training:
         print("Loading optimizer state from checkpoint.")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS * STEPS_PER_EPOCH_TRAIN, eta_min=0.0
+        optimizer, T_max=EPOCHS, eta_min=1e-6
     )
     # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
+
     if checkpoint is not None and resume_training:
         print("Loading scheduler state from checkpoint.")
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -800,7 +818,7 @@ def do_train():
 
             scaler.step(optimizer)
             scaler.update()
-            scheduler.step()
+            # scheduler.step()
 
         calculate_avg(epoch_data, key="train")
 
@@ -970,7 +988,7 @@ def do_train():
 
         unet_total_val_loss = calculate_avg(epoch_data, key="validation")
 
-        # scheduler.step()
+        scheduler.step()
         print(json.dumps(epoch_data, indent=4))
 
         # Save checkopoint after each epoch
