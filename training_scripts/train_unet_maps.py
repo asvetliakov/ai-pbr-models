@@ -75,7 +75,7 @@ print(f"Training phase: {args.phase}")
 
 # HYPER_PARAMETERS
 EPOCHS = 6  # Number of epochs to train
-LR = 1e-5  # Learning rate for the optimizer
+LR = 1e-6  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
 PHASE = args.phase  # Phase of the training per plan, used for logging and saving
@@ -476,7 +476,7 @@ def calculate_unet_maps_loss(
         metal_negative = (metallic_gt.numel() - metal_positive).float()
         metal_weights = (
             ((metal_negative + 1e-6) / (metal_positive + 1e-6))
-            .clamp(min=1.0, max=12.0)
+            .clamp(min=1.0, max=16.0)
             .to(device)
         )
         loss_metal = F.binary_cross_entropy_with_logits(
@@ -533,7 +533,7 @@ def calculate_unet_maps_loss(
             torch.abs(height_pred[..., :-1, :] - height_pred[..., 1:, :]).mean().float()
         )
         tv = dx + dy
-        grad_penalty = 0.01 * tv
+        grad_penalty = 0.005 * tv
         ecpoch_data["unet_maps"][key]["height_tv_penalty"] += grad_penalty.item()
 
         loss_height = l1_height + grad_penalty
@@ -685,7 +685,7 @@ def do_train():
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=1e-6
+        optimizer, T_max=EPOCHS, eta_min=2e-6
     )
     # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
