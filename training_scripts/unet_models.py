@@ -155,10 +155,7 @@ class UNetMaps(nn.Module):
         • Roughness  ‖ 1ch, [0,1]
         • Metallic   ‖ 1ch, [0,1]
         • AO         ‖ 1ch, [0,1]
-        • Height     ‖ 1ch, unrestricted (tanh)
-
-    During PhaseD you will freeze the backbone and
-    train each 1×1 head separately.
+        • Height     ‖ 1ch, [0,1]
     """
 
     def __init__(self, in_ch: int = 3, cond_ch: Optional[int] = 256):
@@ -169,7 +166,7 @@ class UNetMaps(nn.Module):
         self.head_rough = nn.Sequential(nn.Conv2d(64, 1, 1), nn.Sigmoid())
         self.head_metal = nn.Sequential(nn.Conv2d(64, 1, 1), nn.Sigmoid())
         self.head_ao = nn.Sequential(nn.Conv2d(64, 1, 1), nn.Sigmoid())
-        self.head_h = nn.Conv2d(64, 1, 1)  # raw height
+        self.head_h = nn.Sequential(nn.Conv2d(64, 1, 1), nn.Sigmoid())
 
     def forward(self, img, segfeat=None):
         x = self.unet(img, segfeat)
@@ -179,19 +176,3 @@ class UNetMaps(nn.Module):
             "ao": self.head_ao(x),
             "height": self.head_h(x),
         }
-
-
-"""
-# -------------------------------------------------
-# Example usage inside the Phase A0 loop
-segformer = ...                    # your existing model
-unet_alb  = UNetAlbedo(cond_ch=256).to(device)
-unet_maps = UNetMaps(cond_ch=256).to(device)
-
-# ➊ extract SegFormer stage‑4 feature map once
-with torch.no_grad():
-    seg_feats = segformer.decode_head.encoder_features[-1]  # (B,256,H/16,W/16)
-
-alb_pred  = unet_alb(pixel_values, seg_feats)               # (B,3,H,W)
-maps_pred = unet_maps(pixel_values, seg_feats)              # dict of (B,1,H,W)
-"""
