@@ -697,7 +697,7 @@ def do_train():
         },
         {"params": unet_maps.unet.film.parameters(), "lr": base_dec_lr, "weight_decay": 0.0},  # type: ignore # No WD for FiLM
         {
-            "params": unet_maps.out.parameters(),
+            "params": unet_maps.head.parameters(),
             "lr": base_dec_lr,
             "weight_decay": WD,
         },
