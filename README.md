@@ -47,12 +47,12 @@ _Save the **best A2** checkpoint → encoder donor for Maps._
 
 ## 3.1 Unet-Maps losses
 
-| Head   | Loss                                                                  |
-| ------ | --------------------------------------------------------------------- |
-| Rough  | L1 + 0.1 MS-SSIM + 0.02 Sobel                                         |
-| Metal  | Focal BCE + 0.2 L1 + 0.05 Sobel + 0.5 Dice                            |
-| AO     | L1 + 0.1 MS-SSIM + 0.15 Sobel                                         |
-| Height | L1 + 1.5 Grad Diff + 0.005 TV + 0.1 MS-SSIM + 0.05 Normal-Consistency |
+| Head   | Loss                                                                 |
+| ------ | -------------------------------------------------------------------- |
+| Rough  | L1 + 0.1 MS-SSIM + 0.02 Sobel                                        |
+| Metal  | Focal BCE + 0.2 L1 + 0.05 Sobel + 0.5 Dice                           |
+| AO     | L1 + 0.1 MS-SSIM + 0.15 Sobel                                        |
+| Height | L1 + 1.0 Grad Diff + 0.005 TV + 0.1 MS-SSIM + 0.1 Normal-Consistency |
 
 ## 4. Composite‑mosaic rules
 
