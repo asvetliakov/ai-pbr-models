@@ -483,7 +483,8 @@ def normal_consistency_loss(
 
     # 3) build the predicted normals
     nz = torch.ones_like(dx, dtype=torch.float32)
-    N_pred = torch.cat([-dx, -dy, nz], dim=1)
+    # DirectX predirected normal
+    N_pred = torch.cat([-dx, +dy, nz], dim=1)
     N_pred = F.normalize(N_pred, dim=1)
 
     # 4) ensure input normals are float32 & unit
@@ -698,7 +699,8 @@ def calculate_height_loss(
         + 0.005 * tv
         # + 0.005 * tv2
         + 0.1 * height_ssim_loss
-        + 0.05 * normal_loss
+        # + 0.05 * normal_loss
+        + 0.1 * normal_loss
     )
     epoch_data[key]["total_loss"] += loss_height.item()
     return loss_height
