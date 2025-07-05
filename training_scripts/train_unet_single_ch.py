@@ -456,12 +456,10 @@ def calculate_rougness_loss(
     epoch_data: dict,
     key="train",
 ) -> torch.Tensor:
-    if epoch_data.get(key) is None:
-        epoch_data[key] = {
-            "l1_loss": 0.0,
-            "ssim_loss": 0.0,
-            "total_loss": 0.0,
-        }
+    if epoch_data[key].get("total_loss") is None:
+        epoch_data[key]["l1_loss"] = 0.0
+        epoch_data[key]["ssim_loss"] = 0.0
+        epoch_data[key]["total_loss"] = 0.0
 
     l1_rough = F.l1_loss(pred, gt).float()
     epoch_data[key]["l1_loss"] += l1_rough.item()
@@ -488,13 +486,11 @@ def calculate_metallic_loss(
     epoch_data: dict,
     key="train",
 ) -> torch.Tensor:
-    if epoch_data.get(key) is None:
-        epoch_data[key] = {
-            "l1_loss": 0.0,
-            "edge_loss": 0.0,
-            "dice_loss": 0.0,
-            "total_loss": 0.0,
-        }
+    if epoch_data[key].get("total_loss") is None:
+        epoch_data[key]["l1_loss"] = 0.0
+        epoch_data[key]["edge_loss"] = 0.0
+        epoch_data[key]["dice_loss"] = 0.0
+        epoch_data[key]["total_loss"] = 0.0
 
     l1_metal_loss = F.l1_loss(pred, gt).float()
     epoch_data[key]["l1_loss"] += l1_metal_loss.item()
@@ -522,12 +518,11 @@ def calculate_ao_loss(
     epoch_data: dict,
     key="train",
 ) -> torch.Tensor:
-    if epoch_data.get(key) is None:
-        epoch_data[key] = {
-            "l1_loss": 0.0,
-            "edge_loss": 0.0,
-            "total_loss": 0.0,
-        }
+
+    if epoch_data[key].get("total_loss") is None:
+        epoch_data[key]["l1_loss"] = 0.0
+        epoch_data[key]["edge_loss"] = 0.0
+        epoch_data[key]["total_loss"] = 0.0
 
     l1_ao_loss = F.l1_loss(pred, gt).float()
     epoch_data[key]["l1_loss"] += l1_ao_loss.item()
@@ -548,14 +543,12 @@ def calculate_height_loss(
     epoch_data: dict,
     key="train",
 ) -> torch.Tensor:
-    if epoch_data.get(key) is None:
-        epoch_data[key] = {
-            "l1_loss": 0.0,
-            "tv": 0.0,
-            "grad_diff_loss": 0.0,
-            "ssim_loss": 0.0,
-            "total_loss": 0.0,
-        }
+    if epoch_data[key].get("total_loss") is None:
+        epoch_data[key]["l1_loss"] = 0.0
+        epoch_data[key]["tv"] = 0.0
+        epoch_data[key]["grad_diff_loss"] = 0.0
+        epoch_data[key]["ssim_loss"] = 0.0
+        epoch_data[key]["total_loss"] = 0.0
 
     l1_height = F.l1_loss(pred, gt).float()
     epoch_data[key]["l1_loss"] += l1_height.item()
