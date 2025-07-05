@@ -117,7 +117,7 @@ skyrim_train_dataset = SkyrimDataset(
     skyrim_dir=str(skyrim_dir),
     split="train",
     load_non_pbr=False,
-    ignore_without_parallax=UNET_MAP != "parallax",
+    ignore_without_parallax=UNET_MAP == "parallax",
 )
 
 skyrim_validation_dataset = SkyrimDataset(
