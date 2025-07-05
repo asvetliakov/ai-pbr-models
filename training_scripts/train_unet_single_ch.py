@@ -3,18 +3,16 @@ import seed
 import json, torch
 import multiprocessing
 import torch.nn.functional as F
-import lpips
 import argparse
 import math
 from skyrim_dataset import SkyrimDataset
-from unet_models import UNetMaps, UNetAlbedo
+from unet_models import UNetSingleChannel, UNetAlbedo
 from pathlib import Path
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 from torchvision.utils import save_image
 from torchvision.transforms import functional as TF
 from torchmetrics import functional as FM
-import warnings
 from transformers.utils.constants import (
     IMAGENET_STANDARD_MEAN,
     IMAGENET_STANDARD_STD,
@@ -71,11 +69,22 @@ parser.add_argument(
     help="Path to the weight donor checkpoint to load the model from",
 )
 
+parser.add_argument(
+    "--map-to-train",
+    type=str,
+    choices=["roughness", "metallic", "ao", "parallax"],
+    required=True,
+    help="Map to train: roughness, metallic, ao, or parallax",
+)
+
 args = parser.parse_args()
-print(f"Training phase: {args.phase}")
+
+UNET_MAP = args.map_to_train
+
+print(f"Training phase: {args.phase}, map to train: {UNET_MAP}")
 
 # HYPER_PARAMETERS
-EPOCHS = 14  # Number of epochs to train
+EPOCHS = 6  # Number of epochs to train
 # LR = 1e-3  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
@@ -108,7 +117,7 @@ skyrim_train_dataset = SkyrimDataset(
     skyrim_dir=str(skyrim_dir),
     split="train",
     load_non_pbr=False,
-    ignore_without_parallax=True,
+    ignore_without_parallax=UNET_MAP != "parallax",
 )
 
 skyrim_validation_dataset = SkyrimDataset(
@@ -121,10 +130,10 @@ skyrim_validation_dataset.all_validation_samples = (
     skyrim_train_dataset.all_validation_samples
 )
 
-CROP_SIZE = 1024
+CROP_SIZE = 768
 
-BATCH_SIZE = 4
-BATCH_SIZE_VALIDATION = 4
+BATCH_SIZE = 6
+BATCH_SIZE_VALIDATION = 6
 
 SKYRIM_PHOTOMETRIC = 0.0
 
@@ -137,7 +146,7 @@ resume_training = args.resume
 
 
 def get_model():
-    unet_maps = UNetMaps(
+    unet = UNetSingleChannel(
         in_ch=6,  # RGB + Normal
         cond_ch=512,  # Condition channel size, can be adjusted
     ).to(
@@ -148,16 +157,17 @@ def get_model():
         weight_donor_path = Path(args.weight_donor).resolve()
         print(f"Loading model from weight donor: {weight_donor_path}")
         weight_donor_checkpoint = torch.load(weight_donor_path, map_location=device)
-        unet_maps.load_state_dict(
+        unet.load_state_dict(
             weight_donor_checkpoint["unet_albedo_model_state_dict"], strict=False
         )
 
         # ! Set metal bias # to a value that corresponds to 15% metal pixels in the dataset to prevent early collapse
         # Doing this only on the first init on the first phase. If we're setting weight donor then we're at the first phase
-        p0 = 0.15
-        b0 = -math.log((1 - p0) / p0)
-        with torch.no_grad():
-            torch.nn.init.constant_(unet_maps.head_metal[0].bias, b0)  # type: ignore
+        if UNET_MAP == "metallic":
+            p0 = 0.15
+            b0 = -math.log((1 - p0) / p0)
+            with torch.no_grad():
+                torch.nn.init.constant_(unet.out.bias, b0)  # type: ignore
 
     checkpoint = None
     if (args.load_checkpoint is not None) and Path(
@@ -168,7 +178,7 @@ def get_model():
             f"Loading model from checkpoint: {load_checkpoint_path}, resume={resume_training}"
         )
         checkpoint = torch.load(load_checkpoint_path, map_location=device)
-        unet_maps.load_state_dict(checkpoint["unet_maps_model_state_dict"])
+        unet.load_state_dict(checkpoint["unet_maps_model_state_dict"])
 
     # Create segformer and load best weights
     segformer = create_segformer(
@@ -206,7 +216,7 @@ def get_model():
     for param in unet_albedo.parameters():
         param.requires_grad = False
 
-    return unet_maps, segformer, unet_albedo, checkpoint
+    return unet, segformer, unet_albedo, checkpoint
 
 
 def transform_train_fn(example):
@@ -440,230 +450,173 @@ def dice_loss(pred, gt, eps=1e-6):
     return 1.0 - dice_score.mean()
 
 
-def calculate_unet_maps_loss(
-    roughness_pred: torch.Tensor,
-    metallic_pred: torch.Tensor,
-    ao_pred: torch.Tensor,
-    height_pred: torch.Tensor,
-    roughness_gt: torch.Tensor,
-    metallic_gt: torch.Tensor,
-    ao_gt: torch.Tensor,
-    height_gt: torch.Tensor,
-    ecpoch_data: dict,
+def calculate_rougness_loss(
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    epoch_data: dict,
     key="train",
 ) -> torch.Tensor:
-    if ecpoch_data.get("unet_maps") is None:
-        ecpoch_data["unet_maps"] = {}
-
-    if ecpoch_data["unet_maps"].get(key) is None:
-        ecpoch_data["unet_maps"][key] = {
-            "rough_l1_loss": 0.0,
-            "rought_ssim_loss": 0.0,
-            "rough_loss": 0.0,
-            "metal_l1_loss": 0.0,
-            "metal_edge_loss": 0.0,
-            "metal_dice_loss": 0.0,
-            "metal_loss": 0.0,
-            "ao_l1_loss": 0.0,
-            "ao_edge_loss": 0.0,
-            "ao_loss": 0.0,
-            "height_l1_loss": 0.0,
-            "height_tv": 0.0,
-            "height_ssim_loss": 0.0,
-            "height_grad_diff_loss": 0.0,
-            "height_loss": 0.0,
+    if epoch_data.get(key) is None:
+        epoch_data[key] = {
+            "l1_loss": 0.0,
+            "ssim_loss": 0.0,
             "total_loss": 0.0,
         }
 
-    w_rough = 1.0  # Weight for roughness loss
-    w_metal = 1.0  # Weight for metallic loss
-    w_ao = 1.0  # Weight for AO loss
-    w_height = 1.0  # Weight for height loss
+    l1_rough = F.l1_loss(pred, gt).float()
+    epoch_data[key]["l1_loss"] += l1_rough.item()
 
-    if w_rough != 0.0:
-        l1_rough = F.l1_loss(roughness_pred, roughness_gt).float()
-
-        ecpoch_data["unet_maps"][key]["rough_l1_loss"] += l1_rough.item()
-        ssim_rough = FM.structural_similarity_index_measure(
-            roughness_pred.clamp(0, 1).float(),
-            roughness_gt.clamp(0, 1).float(),
-            data_range=1.0,
-        )
-        if isinstance(ssim_rough, tuple):
-            ssim_rough = ssim_rough[0]
-        ssim_rough = torch.nan_to_num(ssim_rough, nan=1.0).float()
-
-        ssim_rough_loss = (1 - ssim_rough).float()
-        ecpoch_data["unet_maps"][key]["rought_ssim_loss"] += ssim_rough_loss.item()
-
-        loss_rough = l1_rough + 0.05 * ssim_rough_loss
-    else:
-        loss_rough = torch.tensor(0.0, device=device)
-
-    loss_rough = loss_rough * w_rough  # Apply weight
-    ecpoch_data["unet_maps"][key]["rough_loss"] += loss_rough.item()
-
-    # Metal
-    if w_metal != 0.0:
-        l1_metal_loss = F.l1_loss(metallic_pred, metallic_gt).float()
-        ecpoch_data["unet_maps"][key]["metal_l1_loss"] += l1_metal_loss.item()
-
-        edge_metal_loss = edge_aware_sobel_loss(metallic_pred, metallic_gt)
-        ecpoch_data["unet_maps"][key]["metal_edge_loss"] += edge_metal_loss.item()
-
-        dice_metal_loss = dice_loss(metallic_pred, metallic_gt).float()
-        ecpoch_data["unet_maps"][key]["metal_dice_loss"] += dice_metal_loss.item()
-
-        # metal_positive = metallic_gt.sum().float()
-        # metal_negative = (metallic_gt.numel() - metal_positive).float()
-        # metal_weights = (
-        #     ((metal_negative + 1e-6) / (metal_positive + 1e-6))
-        #     .clamp(min=1.0, max=16.0)
-        #     .to(device)
-        # )
-        # loss_metal = F.binary_cross_entropy_with_logits(
-        #     metallic_pred, metallic_gt, pos_weight=metal_weights, reduction="mean"
-        # )
-        loss_metal = (
-            l1_metal_loss
-            + 0.15 * l1_metal_loss  # extra snap weight
-            + 0.05 * edge_metal_loss
-            + 0.5 * dice_metal_loss
-        )
-    else:
-        loss_metal = torch.tensor(0.0, device=device)
-
-    loss_metal = loss_metal * w_metal  # Apply weight
-
-    ecpoch_data["unet_maps"][key]["metal_loss"] += loss_metal.item()
-
-    # AO, since every pixel is important, we use a mask of ones
-    # loss_ao = masked_l1(ao_pred, ao_gt, material_mask=mask_all)
-    if w_ao != 0.0:
-        loss_ao_l1 = F.l1_loss(ao_pred, ao_gt).float()
-        ecpoch_data["unet_maps"][key]["ao_l1_loss"] += loss_ao_l1.item()
-
-        # Sobel gradient for AO
-        loss_edge = edge_aware_sobel_loss(ao_pred, ao_gt)
-        ecpoch_data["unet_maps"][key]["ao_edge_loss"] += loss_edge.item()
-
-        loss_ao = loss_ao_l1 + 0.15 * loss_edge
-    else:
-        loss_ao = torch.tensor(0.0, device=device)
-
-    loss_ao = loss_ao * w_ao  # Apply weight
-    ecpoch_data["unet_maps"][key]["ao_loss"] += loss_ao.item()
-
-    # Height
-    # l1_height = masked_l1(height_pred, height_gt, mask_all)
-    if w_height != 0.0:
-        l1_height = F.l1_loss(height_pred, height_gt).float()
-        ecpoch_data["unet_maps"][key]["height_l1_loss"] += l1_height.item()
-        # Gradient total variation (TV) smoothness penalty
-        # [w0 - w1, w1 - w2, ..., wN-1 - wN]
-        dx = torch.abs(height_pred[..., :-1] - height_pred[..., 1:]).mean().float()
-        # [h0 - h1, h1 - h2, ..., hN-1 - hN]
-        dy = (
-            torch.abs(height_pred[..., :-1, :] - height_pred[..., 1:, :]).mean().float()
-        )
-        tv = dx + dy
-        ecpoch_data["unet_maps"][key]["height_tv"] += tv.item()
-
-        # Gradient difference loss
-        height_grad_diff_loss = gradient_difference_loss(height_pred, height_gt)
-        ecpoch_data["unet_maps"][key][
-            "height_grad_diff_loss"
-        ] += height_grad_diff_loss.item()
-
-        # SSIM loss for height
-        ssim_height = FM.structural_similarity_index_measure(
-            height_pred.clamp(0, 1).float(),
-            height_gt.clamp(0, 1).float(),
-            data_range=1.0,
-        )
-        if isinstance(ssim_height, tuple):
-            ssim_height = ssim_height[0]
-        ssim_height = torch.nan_to_num(ssim_height, nan=1.0).float()
-        height_ssim_loss = (1 - ssim_height).float()
-        ecpoch_data["unet_maps"][key]["height_ssim_loss"] += height_ssim_loss.item()
-
-        loss_height = (
-            l1_height
-            + 1.0 * height_grad_diff_loss
-            + 0.005 * tv
-            + 0.1 * height_ssim_loss
-        )
-    else:
-        loss_height = torch.tensor(0.0, device=device)
-
-    loss_height = loss_height * w_height
-    ecpoch_data["unet_maps"][key]["height_loss"] += loss_height.item()
-
-    loss_total = (loss_rough + loss_metal + loss_ao + loss_height) / (
-        w_rough + w_metal + w_ao + w_height
+    ssim_rough = FM.structural_similarity_index_measure(
+        pred.clamp(0, 1).float(), gt.clamp(0, 1).float(), data_range=1.0
     )
-    ecpoch_data["unet_maps"][key]["total_loss"] += loss_total.item()
+    if isinstance(ssim_rough, tuple):
+        ssim_rough = ssim_rough[0]
+    ssim_rough = torch.nan_to_num(ssim_rough, nan=1.0).float()
 
-    return loss_total
+    ssim_rough_loss = (1 - ssim_rough).float()
+    epoch_data[key]["ssim_loss"] += ssim_rough_loss.item()
+
+    loss_rough = l1_rough + 0.1 * ssim_rough_loss
+    epoch_data[key]["total_loss"] += loss_rough.item()
+
+    return loss_rough
+
+
+def calculate_metallic_loss(
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    epoch_data: dict,
+    key="train",
+) -> torch.Tensor:
+    if epoch_data.get(key) is None:
+        epoch_data[key] = {
+            "l1_loss": 0.0,
+            "edge_loss": 0.0,
+            "dice_loss": 0.0,
+            "total_loss": 0.0,
+        }
+
+    l1_metal_loss = F.l1_loss(pred, gt).float()
+    epoch_data[key]["l1_loss"] += l1_metal_loss.item()
+
+    edge_metal_loss = edge_aware_sobel_loss(pred, gt)
+    epoch_data[key]["edge_loss"] += edge_metal_loss.item()
+
+    dice_metal_loss = dice_loss(pred, gt).float()
+    epoch_data[key]["dice_loss"] += dice_metal_loss.item()
+
+    loss_metal = (
+        l1_metal_loss
+        + 0.15 * l1_metal_loss
+        + 0.05 * edge_metal_loss
+        + 0.5 * dice_metal_loss
+    )
+    epoch_data[key]["total_loss"] += loss_metal.item()
+
+    return loss_metal
+
+
+def calculate_ao_loss(
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    epoch_data: dict,
+    key="train",
+) -> torch.Tensor:
+    if epoch_data.get(key) is None:
+        epoch_data[key] = {
+            "l1_loss": 0.0,
+            "edge_loss": 0.0,
+            "total_loss": 0.0,
+        }
+
+    l1_ao_loss = F.l1_loss(pred, gt).float()
+    epoch_data[key]["l1_loss"] += l1_ao_loss.item()
+
+    # Sobel gradient for AO
+    loss_edge = edge_aware_sobel_loss(pred, gt)
+    epoch_data[key]["edge_loss"] += loss_edge.item()
+
+    loss_ao = l1_ao_loss + 0.15 * loss_edge
+    epoch_data[key]["total_loss"] += loss_ao.item()
+
+    return loss_ao
+
+
+def calculate_height_loss(
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    epoch_data: dict,
+    key="train",
+) -> torch.Tensor:
+    if epoch_data.get(key) is None:
+        epoch_data[key] = {
+            "l1_loss": 0.0,
+            "tv": 0.0,
+            "grad_diff_loss": 0.0,
+            "ssim_loss": 0.0,
+            "total_loss": 0.0,
+        }
+
+    l1_height = F.l1_loss(pred, gt).float()
+    epoch_data[key]["l1_loss"] += l1_height.item()
+
+    # Gradient total variation (TV) smoothness penalty
+    # [w0 - w1, w1 - w2, ..., wN-1 - wN]
+    dx = torch.abs(pred[..., :-1] - pred[..., 1:]).mean().float()
+    # [h0 - h1, h1 - h2, ..., hN-1 - hN]
+    dy = torch.abs(pred[..., :-1, :] - pred[..., 1:, :]).mean().float()
+    tv = dx + dy
+    epoch_data[key]["tv"] += tv.item()
+
+    # Gradient difference loss
+    height_grad_diff_loss = gradient_difference_loss(pred, gt)
+    epoch_data[key]["grad_diff_loss"] += height_grad_diff_loss.item()
+
+    # SSIM loss for height
+    ssim_height = FM.structural_similarity_index_measure(
+        pred.clamp(0, 1).float(),
+        gt.clamp(0, 1).float(),
+        data_range=1.0,
+    )
+    if isinstance(ssim_height, tuple):
+        ssim_height = ssim_height[0]
+    ssim_height = torch.nan_to_num(ssim_height, nan=1.0).float()
+    height_ssim_loss = (1 - ssim_height).float()
+    epoch_data[key]["ssim_loss"] += height_ssim_loss.item()
+
+    loss_height = (
+        l1_height + 1.0 * height_grad_diff_loss + 0.005 * tv + 0.1 * height_ssim_loss
+    )
+    epoch_data[key]["total_loss"] += loss_height.item()
+    return loss_height
+
+
+def get_loss(
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    epoch_data: dict,
+    key="train",
+) -> torch.Tensor:
+    if UNET_MAP == "roughness":
+        return calculate_rougness_loss(pred, gt, epoch_data, key)
+    elif UNET_MAP == "metallic":
+        return calculate_metallic_loss(pred, gt, epoch_data, key)
+    elif UNET_MAP == "ao":
+        return calculate_ao_loss(pred, gt, epoch_data, key)
+    elif UNET_MAP == "parallax":
+        return calculate_height_loss(pred, gt, epoch_data, key)
+    else:
+        raise ValueError(f"Unknown loss type: {UNET_MAP}")
 
 
 def calculate_avg(epoch_data, key="train"):
     total_batches = epoch_data[key]["batch_count"]
 
-    epoch_data["unet_maps"][key]["rough_l1_loss"] = (
-        epoch_data["unet_maps"][key]["rough_l1_loss"] / total_batches
-    )
-    epoch_data["unet_maps"][key]["rought_ssim_loss"] = (
-        epoch_data["unet_maps"][key]["rought_ssim_loss"] / total_batches
-    )
-    epoch_data["unet_maps"][key]["rough_loss"] = (
-        epoch_data["unet_maps"][key]["rough_loss"] / total_batches
-    )
+    for k in epoch_data[key].keys():
+        if k != "batch_count":
+            epoch_data[key][k] = epoch_data[key][k] / total_batches
 
-    epoch_data["unet_maps"][key]["metal_l1_loss"] = (
-        epoch_data["unet_maps"][key]["metal_l1_loss"] / total_batches
-    )
-    epoch_data["unet_maps"][key]["metal_edge_loss"] = (
-        epoch_data["unet_maps"][key]["metal_edge_loss"] / total_batches
-    )
-    epoch_data["unet_maps"][key]["metal_dice_loss"] = (
-        epoch_data["unet_maps"][key]["metal_dice_loss"] / total_batches
-    )
-    epoch_data["unet_maps"][key]["metal_loss"] = (
-        epoch_data["unet_maps"][key]["metal_loss"] / total_batches
-    )
-
-    epoch_data["unet_maps"][key]["ao_l1_loss"] = (
-        epoch_data["unet_maps"][key]["ao_l1_loss"] / total_batches
-    )
-    epoch_data["unet_maps"][key]["ao_edge_loss"] = (
-        epoch_data["unet_maps"][key]["ao_edge_loss"] / total_batches
-    )
-    epoch_data["unet_maps"][key]["ao_loss"] = (
-        epoch_data["unet_maps"][key]["ao_loss"] / total_batches
-    )
-
-    epoch_data["unet_maps"][key]["height_l1_loss"] = (
-        epoch_data["unet_maps"][key]["height_l1_loss"] / total_batches
-    )
-    epoch_data["unet_maps"][key]["height_tv"] = (
-        epoch_data["unet_maps"][key]["height_tv"] / total_batches
-    )
-    epoch_data["unet_maps"][key]["height_ssim_loss"] = (
-        epoch_data["unet_maps"][key]["height_ssim_loss"] / total_batches
-    )
-    epoch_data["unet_maps"][key]["height_grad_diff_loss"] = (
-        epoch_data["unet_maps"][key]["height_grad_diff_loss"] / total_batches
-    )
-    epoch_data["unet_maps"][key]["height_loss"] = (
-        epoch_data["unet_maps"][key]["height_loss"] / total_batches
-    )
-
-    epoch_data["unet_maps"][key]["total_loss"] = (
-        epoch_data["unet_maps"][key]["total_loss"] / total_batches
-    )
-
-    return epoch_data["unet_maps"][key]["total_loss"]
+    return epoch_data[key]["total_loss"]
 
 
 def cycle(dl: DataLoader):
@@ -698,7 +651,7 @@ def do_train():
     skyrim_train_loader = DataLoader(
         skyrim_train_dataset,
         batch_size=BATCH_SIZE,
-        num_workers=4,
+        num_workers=8,
         prefetch_factor=2,
         shuffle=True,
         pin_memory=True,
@@ -709,7 +662,7 @@ def do_train():
         skyrim_validation_dataset,
         batch_size=BATCH_SIZE_VALIDATION,
         shuffle=False,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True,
         prefetch_factor=2,
         persistent_workers=True,
@@ -720,8 +673,8 @@ def do_train():
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
     # ❶ encoder with LLRD (0.8^depth)
-    base_enc_lr = 1e-5
-    base_dec_lr = 5e-5
+    base_enc_lr = 2e-5
+    base_dec_lr = 1e-4
 
     param_groups = []
     depth = len(unet_maps.unet.encoder)
@@ -744,22 +697,7 @@ def do_train():
         },
         {"params": unet_maps.unet.film.parameters(), "lr": base_dec_lr, "weight_decay": 0.0},  # type: ignore # No WD for FiLM
         {
-            "params": unet_maps.head_rough.parameters(),
-            "lr": base_dec_lr,
-            "weight_decay": WD,
-        },
-        {
-            "params": unet_maps.head_metal.parameters(),
-            "lr": base_dec_lr,
-            "weight_decay": WD,
-        },
-        {
-            "params": unet_maps.head_ao.parameters(),
-            "lr": base_dec_lr,
-            "weight_decay": WD,
-        },
-        {
-            "params": unet_maps.head_h.parameters(),
+            "params": unet_maps.out.parameters(),
             "lr": base_dec_lr,
             "weight_decay": WD,
         },
@@ -780,9 +718,8 @@ def do_train():
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=1e-6
+        optimizer, T_max=EPOCHS, eta_min=2e-6
     )
-    # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
     if checkpoint is not None and resume_training:
         print("Loading scheduler state from checkpoint.")
@@ -803,7 +740,7 @@ def do_train():
     patience = 6
     no_improvement_count = 0
 
-    output_dir = Path(f"./weights/{PHASE}/unet_maps")
+    output_dir = Path(f"./weights/{PHASE}/unet_{UNET_MAP}").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     start_epoch = 0
@@ -836,20 +773,16 @@ def do_train():
             diffuse_and_normal = skyrim_batch["diffuse_and_normal"]
             albedo_and_normal_segformer = skyrim_batch["albedo_and_normal_segformer"]
             normal = skyrim_batch["normal"]
-            parallax_gt = skyrim_batch["parallax"]
-            ao_gt = skyrim_batch["ao"]
-            metallic_gt = skyrim_batch["metallic"]
-            roughness_gt = skyrim_batch["roughness"]
+
+            gt = skyrim_batch[UNET_MAP]
 
             diffuse_and_normal = diffuse_and_normal.to(device, non_blocking=True)
             albedo_and_normal_segformer = albedo_and_normal_segformer.to(
                 device, non_blocking=True
             )
             normal = normal.to(device, non_blocking=True)
-            parallax_gt = parallax_gt.to(device, non_blocking=True)
-            ao_gt = ao_gt.to(device, non_blocking=True)
-            metallic_gt = metallic_gt.to(device, non_blocking=True)
-            roughness_gt = roughness_gt.to(device, non_blocking=True)
+
+            gt = gt.to(device, non_blocking=True)
 
             optimizer.zero_grad()
             with torch.no_grad():
@@ -874,42 +807,24 @@ def do_train():
             albedo_and_normal = torch.cat((predicted_albedo, normal), dim=1)
 
             with autocast(device_type=device.type):
-                # Get predicted maps from UNet
-                maps_pred = unet_maps(albedo_and_normal, seg_feats)
+                # Get predicted map from UNet
+                predicted = unet_maps(albedo_and_normal, seg_feats)
 
-            pred_parallax = maps_pred["height"]
-            pred_ao = maps_pred["ao"]
-            pred_metallic = maps_pred["metal"]
-            pred_roughness = maps_pred["rough"]
-
-            # Unet-albedo loss
-            unet_loss = calculate_unet_maps_loss(
-                pred_roughness,
-                pred_metallic,
-                pred_ao,
-                pred_parallax,
-                roughness_gt,
-                metallic_gt,
-                ao_gt,
-                parallax_gt,
+            loss = get_loss(
+                predicted,
+                gt,
                 epoch_data,
                 key="train",
             )
 
-            if torch.isnan(unet_loss):
+            if torch.isnan(loss):
                 raise ValueError(
                     "Unet loss is NaN, stopping training to avoid further issues."
                 )
 
             epoch_data["train"]["batch_count"] += 1
 
-            # Total loss
-            total_loss = unet_loss
-
-            # loss.backward()
-            # optimizer.step()
-
-            scaler.scale(total_loss).backward()
+            scaler.scale(loss).backward()
 
             scaler.step(optimizer)
             scaler.update()
@@ -935,27 +850,23 @@ def do_train():
                     "albedo_and_normal_segformer"
                 ]
                 normal = skyrim_batch["normal"]
-                parallax_gt = skyrim_batch["parallax"]
-                ao_gt = skyrim_batch["ao"]
-                metallic_gt = skyrim_batch["metallic"]
-                roughness_gt = skyrim_batch["roughness"]
+                name = skyrim_batch["name"]
                 albedo_gt = skyrim_batch["albedo"]
                 diffuse_gt = skyrim_batch["orig_diffuse"]
                 normal_gt = skyrim_batch["orig_normal"]
-                name = skyrim_batch["name"]
+
+                gt = skyrim_batch[UNET_MAP]
 
                 diffuse_and_normal = diffuse_and_normal.to(device, non_blocking=True)
                 albedo_and_normal_segformer = albedo_and_normal_segformer.to(
                     device, non_blocking=True
                 )
                 normal = normal.to(device, non_blocking=True)
-                parallax_gt = parallax_gt.to(device, non_blocking=True)
-                ao_gt = ao_gt.to(device, non_blocking=True)
-                metallic_gt = metallic_gt.to(device, non_blocking=True)
-                roughness_gt = roughness_gt.to(device, non_blocking=True)
-                albedo_gt = albedo_gt.to(device, non_blocking=True)
                 diffuse_gt = diffuse_gt.to(device, non_blocking=True)
                 normal_gt = normal_gt.to(device, non_blocking=True)
+                albedo_gt = albedo_gt.to(device, non_blocking=True)
+
+                gt = gt.to(device, non_blocking=True)
 
                 with autocast(device_type=device.type):
                     #  Get Segoformer ouput for FiLM
@@ -981,23 +892,12 @@ def do_train():
                 albedo_and_normal = torch.cat((predicted_albedo, normal), dim=1)
 
                 with autocast(device_type=device.type):
-                    # Get predicted maps from UNet
-                    maps_pred = unet_maps(albedo_and_normal, seg_feats)
+                    # Get predicted map from UNet
+                    predicted = unet_maps(albedo_and_normal, seg_feats)
 
-                pred_parallax = maps_pred["height"]
-                pred_ao = maps_pred["ao"]
-                pred_metallic = maps_pred["metal"]
-                pred_roughness = maps_pred["rough"]
-
-                calculate_unet_maps_loss(
-                    pred_roughness,
-                    pred_metallic,
-                    pred_ao,
-                    pred_parallax,
-                    roughness_gt,
-                    metallic_gt,
-                    ao_gt,
-                    parallax_gt,
+                get_loss(
+                    predicted,
+                    gt,
                     epoch_data,
                     key="validation",
                 )
@@ -1009,33 +909,21 @@ def do_train():
                     and num_samples_saved < VISUAL_SAMPLES_COUNT
                 ):
                     for (
+                        sample_name,
                         sample_diffuse,
                         sample_normal,
                         sample_albedo_gt,
-                        sample_roughness_gt,
-                        sample_metallic_gt,
-                        sample_ao_gt,
-                        sample_parallax_gt,
+                        gt,
                         sample_albedo_pred,
-                        sample_pred_roughness,
-                        sample_pred_metallic,
-                        sample_pred_ao,
-                        sample_pred_parallax,
-                        sample_name,
+                        predicted,
                     ) in zip(
+                        name,
                         diffuse_gt,
                         normal_gt,
                         albedo_gt,
-                        roughness_gt,
-                        metallic_gt,
-                        ao_gt,
-                        parallax_gt,
+                        gt,
                         predicted_albedo_orig,
-                        pred_roughness,
-                        pred_metallic,
-                        pred_ao,
-                        pred_parallax,
-                        name,
+                        predicted,
                     ):
 
                         # Save few samples per class for inspection
@@ -1047,10 +935,7 @@ def do_train():
                                 sample_diffuse,
                                 sample_normal,
                                 sample_albedo_gt,
-                                to_rgb(sample_roughness_gt),
-                                to_rgb(sample_metallic_gt),
-                                to_rgb(sample_ao_gt),
-                                to_rgb(sample_parallax_gt),
+                                to_rgb(gt),
                             ],
                             dim=2,  # Concatenate along width
                         )
@@ -1059,10 +944,7 @@ def do_train():
                                 sample_diffuse,
                                 sample_normal,
                                 sample_albedo_pred,
-                                to_rgb(sample_pred_roughness),
-                                to_rgb(sample_pred_metallic),
-                                to_rgb(sample_pred_ao),
-                                to_rgb(sample_pred_parallax),
+                                to_rgb(predicted),
                             ],
                             dim=2,  # Concatenate along width
                         )
