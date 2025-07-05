@@ -477,10 +477,9 @@ def normal_consistency_loss(
     H32 = pred.to(torch.float32)
 
     # 2) get Sobel ∂H/∂x, ∂H/∂y in one call
-    #    returns (B,2,H,W): channel 0 = dx, 1 = dy
+    #    returns (B,C,2,H,W): channel 0 = dx, 1 = dy
     grads = K.filters.spatial_gradient(H32, mode="sobel", order=1)
-    # grads shape is (B,2,H,W)  where grads[:,0] = dx, grads[:,1] = dy
-    dx, dy = grads[:, 0:1], grads[:, 1:2]
+    dx, dy = grads[..., 0, :, :], grads[..., 1, :, :]
 
     # 3) build the predicted normals
     nz = torch.ones_like(dx, dtype=torch.float32)
