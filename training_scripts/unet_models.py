@@ -76,12 +76,14 @@ class FiLM(nn.Module):
 # Backbone UNet
 # -------------------------------------------------
 class _UNetBackbone(nn.Module):
+
     def __init__(
         self,
         in_ch: int = 3,
         base: int = 64,
         depth: int = 4,
         cond_ch: Optional[int] = None,  # channels of SegFormer feature map
+        mask_film: bool = False,
     ):
         super().__init__()
         self.depth = depth
@@ -100,10 +102,22 @@ class _UNetBackbone(nn.Module):
             dec.append(Up(in_ch_dec, base * 2 ** (i - 1)))
         self.decoder = nn.ModuleList(dec)
 
-        # optional FiLM
+        # Segformer FiLM
         self.film = FiLM(cond_ch, base * 2**depth) if cond_ch is not None else None
+        # Late-fusion mask FiLM
+        self.mask_film = FiLM(1, base * 2**depth) if mask_film else None
 
-    def forward(self, x, cond: Optional[torch.Tensor] = None):
+        if self.mask_film is not None:
+            # initialize so mask has near-zero influence at start
+            nn.init.constant_(self.mask_film.to_gamma.bias, -2.0)  # type: ignore
+            nn.init.constant_(self.mask_film.to_beta.bias, 0.0)  # type: ignore
+
+    def forward(
+        self,
+        x,
+        cond: Optional[torch.Tensor] = None,
+        gray_mask: Optional[torch.Tensor] = None,
+    ):
         # x  : (B, in_ch, H, W)
         # cond: (B, cond_ch, H/16, W/16)  ← SegFormer stage 4
         skips = [self.inc(x)]
@@ -111,12 +125,20 @@ class _UNetBackbone(nn.Module):
             skips.append(down(skips[-1]))
 
         bottleneck = self.bot(skips[-1])
+        # --- SegFormer FiLM  ---
         if self.film is not None and cond is not None:
             # up‑sample cond to bottleneck spatial size
             cond = F.interpolate(
                 cond, size=bottleneck.shape[-2:], mode="bilinear", align_corners=False
             )
             bottleneck = self.film(bottleneck, cond)
+
+        # --- Late-fusion mask FiLM ---
+        if self.mask_film is not None and gray_mask is not None:
+            gm = F.interpolate(
+                gray_mask, bottleneck.shape[-2:], mode="bilinear", align_corners=False
+            )
+            bottleneck = self.mask_film(bottleneck, gm)
 
         out = bottleneck
         for up, skip in zip(self.decoder, reversed(skips)):
@@ -179,11 +201,15 @@ class UNetMaps(nn.Module):
 
 
 class UNetSingleChannel(nn.Module):
-    def __init__(self, in_ch: int = 3, cond_ch: Optional[int] = 256):
+    def __init__(
+        self, in_ch: int = 3, cond_ch: Optional[int] = 256, mask_film: bool = False
+    ):
         super().__init__()
-        self.unet = _UNetBackbone(in_ch, base=64, depth=4, cond_ch=cond_ch)
+        self.unet = _UNetBackbone(
+            in_ch, base=64, depth=4, cond_ch=cond_ch, mask_film=mask_film
+        )
         self.head = nn.Conv2d(64, 1, 1)
 
-    def forward(self, img, segfeat=None):
-        x = self.unet(img, segfeat)
+    def forward(self, img, segfeat=None, gray_mask=None):
+        x = self.unet(img, segfeat, gray_mask)
         return self.head(x)
