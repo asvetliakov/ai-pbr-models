@@ -37,15 +37,7 @@ _Save the **best A2** checkpoint → encoder donor for Maps._
 
 ---
 
-## 3.1 UNet‑Maps (M)
-
-|  Phase | Dataset   | Encoder init           | Trainables             | **Crop / Feed (px)** | Epochs | Optimiser & LR                                | Scheduler | Core losses          |
-| -----: | --------- | ---------------------- | ---------------------- | -------------------- | -----: | --------------------------------------------- | --------- | -------------------- |
-| **M0** | 100 % Sky | best A2 (strict False) | enc + dec + heads      | **768**              |      6 | AdamW: enc 2e‑5 (LLRD 0.8^d) · dec/heads 1e‑4 | cosine‑6  | See table            |
-| **M1** | 100 % Sky | from M0                | enc + dec + heads      | **1 024**            |      8 | AdamW: enc 1e‑5 · dec/heads 5e‑5              | cosine‑8  | same                 |
-| **M2** | 100 % Sky | best M1                | **one head at a time** | **1 024**            |    5–7 | Adam 1e‑6                                     | Exp 0.9   | same (detach Albedo) |
-
-## 3.2 Separate Unet per map (M)
+## 3. Separate Unet per map (M)
 
 |         Phase | Dataset   | Encoder init           | Trainables        | **Crop / Feed (px)** | Epochs | Optimiser & LR                                | Scheduler              | Core losses |
 | ------------: | --------- | ---------------------- | ----------------- | -------------------- | -----: | --------------------------------------------- | ---------------------- | ----------- |
