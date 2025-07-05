@@ -182,7 +182,7 @@ class UNetSingleChannel(nn.Module):
     def __init__(self, in_ch: int = 3, cond_ch: Optional[int] = 256):
         super().__init__()
         self.unet = _UNetBackbone(in_ch, base=64, depth=4, cond_ch=cond_ch)
-        self.head = nn.Sequential(nn.Conv2d(64, 1, 1), nn.Sigmoid())
+        self.head = nn.Conv2d(64, 1, 1)
 
     def forward(self, img, segfeat=None):
         x = self.unet(img, segfeat)
