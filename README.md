@@ -50,17 +50,17 @@ _Save the **best A2** checkpoint → encoder donor for Maps._
 |         Phase | Dataset   | Encoder init           | Trainables        | **Crop / Feed (px)** | Epochs | Optimiser & LR                                | Scheduler              | Core losses |
 | ------------: | --------- | ---------------------- | ----------------- | -------------------- | -----: | --------------------------------------------- | ---------------------- | ----------- |
 |        **M0** | 100 % Sky | best A2 (strict False) | enc + dec + heads | **768**              |      6 | AdamW: enc 5e‑5 (LLRD 0.8^d) · dec/heads 2e‑4 | cosine‑6,eta_min=5e-6  | See table   |
-|        **M1** | 100 % Sky | from M0                | enc + dec + heads | **1 024**            |     12 | AdamW: enc 8e‑6 · dec/heads 3e‑5              | cosine‑12,eta_min=1e-6 | same        |
-| **M1-height** | 100 % Sky | from M0                | enc + dec + heads | **1 024**            |     16 | AdamW: enc 8e‑6 · dec/heads 3e‑5              | cosine‑16,eta_min=5e-7 | same        |
+|        **M1** | 100 % Sky | from M0                | enc + dec + heads | **1 024**            |     12 | AdamW: enc 8e‑6 (LLRD) · dec/heads 3e‑5       | cosine‑12,eta_min=1e-6 | same        |
+| **M1-height** | 100 % Sky | from M0                | enc + dec + heads | **1 024**            |     16 | AdamW: enc 8e‑6 (LLRD) · dec/heads 3e‑5       | cosine‑16,eta_min=5e-7 | same        |
 
 ## 3.1 Unet-Maps losses
 
-| Head   | Loss                                 |
-| ------ | ------------------------------------ |
-| Rough  | L1 + 0.05 SSIM                       |
-| Metal  | L1 + 0.15 L1 + 0.05 Sobel + 0.5 Dice |
-| AO     | L1 + 0.15 Sobel                      |
-| Height | L1 + Grad Diff + 0.005 TV + 0.1 SSIM |
+| Head   | Loss                                                                  |
+| ------ | --------------------------------------------------------------------- |
+| Rough  | L1 + 0.1 MS-SSIM + 0.02 Sobel                                         |
+| Metal  | Focal BCE + 0.2 L1 + 0.05 Sobel + 0.5 Dice                            |
+| AO     | L1 + 0.1 MS-SSIM + 0.15 Sobel                                         |
+| Height | L1 + 1.5 Grad Diff + 0.005 TV + 0.1 MS-SSIM + 0.05 Normal-Consistency |
 
 ## 4. Composite‑mosaic rules
 

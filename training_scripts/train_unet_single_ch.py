@@ -450,6 +450,78 @@ def dice_loss(pred, gt, eps=1e-6):
     return 1.0 - dice_score.mean()
 
 
+def tv2_loss(x: torch.Tensor) -> torch.Tensor:
+    """
+    x: (B,1,H,W) height map
+    returns: scalar mean of second-order TV
+    """
+    # second differences along width (x-axis)
+    d2x = x[..., :, :-2] - 2 * x[..., :, 1:-1] + x[..., :, 2:]
+    # second differences along height (y-axis)
+    d2y = x[..., :, :-2, :] - 2 * x[..., :, 1:-1, :] + x[..., :, 2:, :]
+
+    # take absolute value and mean
+    loss_x = d2x.abs().float().mean()
+    loss_y = d2y.abs().float().mean()
+    return loss_x + loss_y
+
+
+def normal_consistency_loss(
+    pred: torch.Tensor, normal_map: torch.Tensor
+) -> torch.Tensor:
+    """
+    pred:       (B,1,H,W) predicted height ∈ [0,1]
+    normal_map: (B,3,H,W) input normals ∈ [-1,1]
+    """
+    # 1) cast to float32 for stable Sobel
+    H32 = pred.to(torch.float32)
+
+    # 2) get Sobel ∂H/∂x, ∂H/∂y in one call
+    #    returns (B,2,H,W): channel 0 = dx, 1 = dy
+    grads = K.filters.spatial_gradient(H32, mode="sobel", order=1)
+    # grads shape is (B,2,H,W)  where grads[:,0] = dx, grads[:,1] = dy
+    dx, dy = grads[:, 0:1], grads[:, 1:2]
+
+    # 3) build the predicted normals
+    nz = torch.ones_like(dx, dtype=torch.float32)
+    N_pred = torch.cat([-dx, -dy, nz], dim=1)
+    N_pred = F.normalize(N_pred, dim=1)
+
+    # 4) ensure input normals are float32 & unit
+    N_in = F.normalize(normal_map.to(torch.float32), dim=1)
+
+    # 5) cosine‐distance
+    cos = (N_pred * N_in).sum(dim=1)  # (B,H,W)
+    loss = (1.0 - cos).mean()
+
+    return loss
+
+
+def focal_bce_with_logits(pred, targets, gamma=2.0, pos_weight=None, reduction="mean"):
+    """
+    Focal BCE for a single-channel (metal) mask.
+
+    logits  : (B,1,H,W) raw network outputs
+    targets : (B,1,H,W) ground-truth ∈ {0,1} or [0,1]
+    """
+    # standard BCE, no reduction yet
+    bce = F.binary_cross_entropy_with_logits(
+        pred, targets, pos_weight=pos_weight, reduction="none"
+    )
+    # convert logits → probability of the *true* class
+    pred = pred * targets + (1.0 - pred) * (1.0 - targets)
+
+    focal_factor = (1.0 - pred).pow(gamma)  # (B,1,H,W)
+    loss = focal_factor * bce  # shape like bce
+
+    if reduction == "mean":
+        return loss.mean()
+    elif reduction == "sum":
+        return loss.sum()
+    else:  # "none"
+        return loss
+
+
 def calculate_rougness_loss(
     pred: torch.Tensor,
     gt: torch.Tensor,
@@ -459,22 +531,25 @@ def calculate_rougness_loss(
     if epoch_data[key].get("total_loss") is None:
         epoch_data[key]["l1_loss"] = 0.0
         epoch_data[key]["ssim_loss"] = 0.0
+        epoch_data[key]["edge_loss"] = 0.0
         epoch_data[key]["total_loss"] = 0.0
 
-    l1_rough = F.l1_loss(pred, gt).float()
-    epoch_data[key]["l1_loss"] += l1_rough.item()
-
-    ssim_rough = FM.structural_similarity_index_measure(
-        pred.clamp(0, 1).float(), gt.clamp(0, 1).float(), data_range=1.0
+    prob = torch.sigmoid(pred)
+    ssim_rough = FM.multiscale_structural_similarity_index_measure(
+        prob, gt.clamp(0, 1).float(), data_range=1.0
     )
-    if isinstance(ssim_rough, tuple):
-        ssim_rough = ssim_rough[0]
     ssim_rough = torch.nan_to_num(ssim_rough, nan=1.0).float()
 
     ssim_rough_loss = (1 - ssim_rough).float()
     epoch_data[key]["ssim_loss"] += ssim_rough_loss.item()
 
-    loss_rough = l1_rough + 0.1 * ssim_rough_loss
+    l1_rough = F.l1_loss(prob, gt).float()
+    epoch_data[key]["l1_loss"] += l1_rough.item()
+
+    loss_edge = edge_aware_sobel_loss(prob, gt)
+    epoch_data[key]["edge_loss"] += loss_edge.item()
+
+    loss_rough = l1_rough + 0.1 * ssim_rough_loss + 0.02 * loss_edge
     epoch_data[key]["total_loss"] += loss_rough.item()
 
     return loss_rough
@@ -487,25 +562,47 @@ def calculate_metallic_loss(
     key="train",
 ) -> torch.Tensor:
     if epoch_data[key].get("total_loss") is None:
+        epoch_data[key]["bce"] = 0
         epoch_data[key]["l1_loss"] = 0.0
         epoch_data[key]["edge_loss"] = 0.0
         epoch_data[key]["dice_loss"] = 0.0
         epoch_data[key]["total_loss"] = 0.0
 
-    l1_metal_loss = F.l1_loss(pred, gt).float()
+    metal_positive = gt.float().sum()
+    metal_negative = (gt.numel() - metal_positive).float()
+    if metal_positive == 0:
+        metal_weights = torch.tensor(1.0, device=device)
+        skip_bce = True
+    else:
+        metal_weights = (
+            ((metal_negative + 1e-6) / (metal_positive + 1e-6))
+            .clamp(min=1.0, max=16.0)
+            .to(device)
+        )
+        skip_bce = False
+
+    if not skip_bce:
+        bce = focal_bce_with_logits(
+            pred, gt, pos_weight=metal_weights, gamma=2.0, reduction="mean"
+        )
+    else:
+        bce = pred.new_zeros(())
+
+    epoch_data[key]["bce"] += bce.item()
+
+    prob = torch.sigmoid(pred)
+
+    l1_metal_loss = F.l1_loss(prob, gt, reduction="mean").float()
     epoch_data[key]["l1_loss"] += l1_metal_loss.item()
 
-    edge_metal_loss = edge_aware_sobel_loss(pred, gt)
+    edge_metal_loss = edge_aware_sobel_loss(prob, gt).float()
     epoch_data[key]["edge_loss"] += edge_metal_loss.item()
 
-    dice_metal_loss = dice_loss(pred, gt).float()
+    dice_metal_loss = dice_loss(prob, gt).float()
     epoch_data[key]["dice_loss"] += dice_metal_loss.item()
 
     loss_metal = (
-        l1_metal_loss
-        + 0.15 * l1_metal_loss
-        + 0.05 * edge_metal_loss
-        + 0.5 * dice_metal_loss
+        bce + 0.2 * l1_metal_loss + 0.05 * edge_metal_loss + 0.5 * dice_metal_loss
     )
     epoch_data[key]["total_loss"] += loss_metal.item()
 
@@ -522,16 +619,26 @@ def calculate_ao_loss(
     if epoch_data[key].get("total_loss") is None:
         epoch_data[key]["l1_loss"] = 0.0
         epoch_data[key]["edge_loss"] = 0.0
+        epoch_data[key]["ssim_loss"] = 0.0
         epoch_data[key]["total_loss"] = 0.0
 
-    l1_ao_loss = F.l1_loss(pred, gt).float()
+    prob = torch.sigmoid(pred)
+
+    l1_ao_loss = F.l1_loss(prob, gt).float()
     epoch_data[key]["l1_loss"] += l1_ao_loss.item()
 
     # Sobel gradient for AO
-    loss_edge = edge_aware_sobel_loss(pred, gt)
+    loss_edge = edge_aware_sobel_loss(prob, gt)
     epoch_data[key]["edge_loss"] += loss_edge.item()
 
-    loss_ao = l1_ao_loss + 0.15 * loss_edge
+    ssim = FM.multiscale_structural_similarity_index_measure(
+        prob, gt.clamp(0, 1).float(), data_range=1.0
+    )
+    ssim = torch.nan_to_num(ssim, nan=1.0).float()
+    ssim_loss = (1 - ssim).float()
+    epoch_data[key]["ssim_loss"] += ssim_loss.item()
+
+    loss_ao = l1_ao_loss + 0.15 * loss_edge + 0.1 * ssim_loss
     epoch_data[key]["total_loss"] += loss_ao.item()
 
     return loss_ao
@@ -540,45 +647,59 @@ def calculate_ao_loss(
 def calculate_height_loss(
     pred: torch.Tensor,
     gt: torch.Tensor,
+    normal_map: torch.Tensor,
     epoch_data: dict,
     key="train",
 ) -> torch.Tensor:
     if epoch_data[key].get("total_loss") is None:
         epoch_data[key]["l1_loss"] = 0.0
         epoch_data[key]["tv"] = 0.0
+        # epoch_data[key]["tv2"] = 0.0
+        epoch_data[key]["normal_consistency_loss"] = 0.0
         epoch_data[key]["grad_diff_loss"] = 0.0
         epoch_data[key]["ssim_loss"] = 0.0
         epoch_data[key]["total_loss"] = 0.0
 
-    l1_height = F.l1_loss(pred, gt).float()
+    prob = torch.sigmoid(pred)
+
+    l1_height = F.l1_loss(prob, gt).float()
     epoch_data[key]["l1_loss"] += l1_height.item()
 
     # Gradient total variation (TV) smoothness penalty
-    # [w0 - w1, w1 - w2, ..., wN-1 - wN]
-    dx = torch.abs(pred[..., :-1] - pred[..., 1:]).mean().float()
-    # [h0 - h1, h1 - h2, ..., hN-1 - hN]
-    dy = torch.abs(pred[..., :-1, :] - pred[..., 1:, :]).mean().float()
+    # # [w0 - w1, w1 - w2, ..., wN-1 - wN]
+    dx = torch.abs(prob[..., :-1] - prob[..., 1:]).mean().float()
+    # # [h0 - h1, h1 - h2, ..., hN-1 - hN]
+    dy = torch.abs(prob[..., :-1, :] - prob[..., 1:, :]).mean().float()
     tv = dx + dy
     epoch_data[key]["tv"] += tv.item()
 
     # Gradient difference loss
-    height_grad_diff_loss = gradient_difference_loss(pred, gt)
+    height_grad_diff_loss = gradient_difference_loss(prob, gt)
     epoch_data[key]["grad_diff_loss"] += height_grad_diff_loss.item()
 
     # SSIM loss for height
-    ssim_height = FM.structural_similarity_index_measure(
-        pred.clamp(0, 1).float(),
+    ssim_height = FM.multiscale_structural_similarity_index_measure(
+        prob,
         gt.clamp(0, 1).float(),
         data_range=1.0,
     )
-    if isinstance(ssim_height, tuple):
-        ssim_height = ssim_height[0]
     ssim_height = torch.nan_to_num(ssim_height, nan=1.0).float()
     height_ssim_loss = (1 - ssim_height).float()
     epoch_data[key]["ssim_loss"] += height_ssim_loss.item()
 
+    # tv2 = tv2_loss(pred)
+    # epoch_data[key]["tv2"] += tv2.item()
+
+    normal_loss = normal_consistency_loss(prob, normal_map)
+    epoch_data[key]["normal_consistency_loss"] += normal_loss.item()
+
     loss_height = (
-        l1_height + 1.0 * height_grad_diff_loss + 0.005 * tv + 0.1 * height_ssim_loss
+        l1_height
+        + 1.0 * height_grad_diff_loss
+        + 0.005 * tv
+        # + 0.005 * tv2
+        + 0.1 * height_ssim_loss
+        + 0.05 * normal_loss
     )
     epoch_data[key]["total_loss"] += loss_height.item()
     return loss_height
@@ -587,6 +708,7 @@ def calculate_height_loss(
 def get_loss(
     pred: torch.Tensor,
     gt: torch.Tensor,
+    normal_map: torch.Tensor,
     epoch_data: dict,
     key="train",
 ) -> torch.Tensor:
@@ -597,7 +719,7 @@ def get_loss(
     elif UNET_MAP == "ao":
         return calculate_ao_loss(pred, gt, epoch_data, key)
     elif UNET_MAP == "parallax":
-        return calculate_height_loss(pred, gt, epoch_data, key)
+        return calculate_height_loss(pred, gt, normal_map, epoch_data, key)
     else:
         raise ValueError(f"Unknown loss type: {UNET_MAP}")
 
@@ -668,6 +790,8 @@ def do_train():
     # ❶ encoder with LLRD (0.8^depth)
     base_enc_lr = 5e-5
     base_dec_lr = 2e-4
+    # base_enc_lr = 1e-5
+    # base_dec_lr = 5e-5
 
     param_groups = []
     depth = len(unet_maps.unet.encoder)
@@ -725,9 +849,7 @@ def do_train():
 
     best_val_loss = float("inf")
     if checkpoint is not None and args.load_best_loss and resume_training:
-        best_val_loss = checkpoint["epoch_data"]["unet_maps"]["validation"][
-            "total_loss"
-        ]
+        best_val_loss = checkpoint["epoch_data"]["validation"]["total_loss"]
         print(f"Loading best validation loss from checkpoint: {best_val_loss}")
 
     patience = 6
@@ -753,6 +875,7 @@ def do_train():
                 "batch_count": 0,
             },
         }
+        # accum_steps = 2
 
         bar = tqdm(
             range(STEPS_PER_EPOCH_TRAIN),
@@ -760,6 +883,7 @@ def do_train():
             unit="batch",
         )
 
+        # optimizer.zero_grad(set_to_none=True)
         for i in bar:
             skyrim_batch = next(skyrim_train_iter)
 
@@ -806,6 +930,7 @@ def do_train():
             loss = get_loss(
                 predicted,
                 gt,
+                normal,
                 epoch_data,
                 key="train",
             )
@@ -817,10 +942,16 @@ def do_train():
 
             epoch_data["train"]["batch_count"] += 1
 
+            # loss = loss / accum_steps  # Scale loss for accumulation
             scaler.scale(loss).backward()
 
             scaler.step(optimizer)
             scaler.update()
+
+            # if (i + 1) % accum_steps == 0 or (i + 1) == STEPS_PER_EPOCH_TRAIN:
+            #     scaler.step(optimizer)
+            #     scaler.update()
+            #     optimizer.zero_grad(set_to_none=True)
             # scheduler.step()
 
         calculate_avg(epoch_data, key="train")
@@ -891,6 +1022,7 @@ def do_train():
                 get_loss(
                     predicted,
                     gt,
+                    normal,
                     epoch_data,
                     key="validation",
                 )
@@ -937,7 +1069,7 @@ def do_train():
                                 sample_diffuse,
                                 sample_normal,
                                 sample_albedo_pred,
-                                to_rgb(predicted),
+                                to_rgb(torch.sigmoid(predicted)),
                             ],
                             dim=2,  # Concatenate along width
                         )
