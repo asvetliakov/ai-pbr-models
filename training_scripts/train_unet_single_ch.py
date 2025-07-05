@@ -666,8 +666,8 @@ def do_train():
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
     # ❶ encoder with LLRD (0.8^depth)
-    base_enc_lr = 2e-5
-    base_dec_lr = 1e-4
+    base_enc_lr = 5e-5
+    base_dec_lr = 2e-4
 
     param_groups = []
     depth = len(unet_maps.unet.encoder)
