@@ -711,7 +711,7 @@ def do_train():
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=2e-6
+        optimizer, T_max=EPOCHS, eta_min=5e-6
     )
 
     if checkpoint is not None and resume_training:
