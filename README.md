@@ -63,19 +63,19 @@ Start from scratch
 
 | Map       | Input                                    |
 | --------- | ---------------------------------------- |
-| height    | normal + mean curvature - poisson-coarse |
-| ao        | normal                                   |
+| height    | normal + mean curvature + poisson-coarse |
+| ao        | normal + mean curvature + poisson-coarse |
 | roughness | albedo + normal                          |
 | metallic  | albedo                                   |
 
 ## 3.5 Per‑map network & loss recipes
 
-| map        | **UNet in‑ch**                               | loss = _λᵢ·termᵢ_                                                                                              |
-| ---------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| **Height** | **5** (normal+mean curvature+poisson-corase) | `1.0·L1 + 0.25·GradDiff + 0.06·TV + 0.15->0.10(decay in P2)·Normal‑Reproj + 0.06·MS‑SSIM + 0.1*Laplacian-Pyr ` |
-| **AO**     | 3 (normal)                                   | `1.0·L1 + 0.15·Sobel + 0.1·MS‑SSIM`                                                                            |
-| **Rough**  | 6 (albedo+normal)                            | `1.0·L1 + 0.1·MS‑SSIM + 0.02·Sobel`                                                                            |
-| **Metal**  | 3 (albedo)                                   | `0.5·Dice + 1.0·Focal‑BCE(γ=2, α=0.75) + 0.1·L1 + 0.05·Sobel`                                                  |
+| map        | loss = _λᵢ·termᵢ_                                                                                              |
+| ---------- | -------------------------------------------------------------------------------------------------------------- |
+| **Height** | `1.0·L1 + 0.25·GradDiff + 0.06·TV + 0.15->0.10(decay in P2)·Normal‑Reproj + 0.06·MS‑SSIM + 0.1*Laplacian-Pyr ` |
+| **AO**     | `1.0·L1 + 0.15·Sobel + 0.1·MS‑SSIM`                                                                            |
+| **Rough**  | `1.0·L1 + 0.1·MS‑SSIM + 0.02·Sobel`                                                                            |
+| **Metal**  | `0.5·Dice + 1.0·Focal‑BCE(γ=2, α=0.75) + 0.1·L1 + 0.05·Sobel`                                                  |
 
 ## 4. Composite‑mosaic rules
 
