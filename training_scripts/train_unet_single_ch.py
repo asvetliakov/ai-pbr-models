@@ -156,9 +156,7 @@ resume_training = args.resume
 
 
 def get_model():
-    unet_channels = 3
-    if UNET_MAP == "parallax":
-        unet_channels = 5
+    unet_channels = 5
 
     unet = UNetSingleChannel(in_ch=unet_channels, cond_ch=512).to(device)  # type: ignore
 
@@ -970,8 +968,8 @@ def do_train():
 
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
-    # base_enc_lr = 1e-4
-    # base_dec_lr = 2e-4
+    # base_enc_lr = 8e-5
+    # base_dec_lr = 1.6e-4
     # base_enc_lr = 8e-5
     base_dec_lr = 1e-4
 
@@ -1152,7 +1150,7 @@ def do_train():
             )
             predicted_albedo = predicted_albedo.to(device, non_blocking=True)
 
-            if UNET_MAP == "parallax":
+            if UNET_MAP == "parallax" or UNET_MAP == "ao":
                 curvature = mean_curvature_map(normal)
                 input = torch.cat(
                     [
@@ -1257,7 +1255,7 @@ def do_train():
                 )
                 predicted_albedo = predicted_albedo.to(device, non_blocking=True)
 
-                if UNET_MAP == "parallax":
+                if UNET_MAP == "parallax" or UNET_MAP == "ao":
                     curvature = mean_curvature_map(normal)
                     input = torch.cat(
                         [
