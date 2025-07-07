@@ -64,6 +64,7 @@ class SkyrimDataset(Dataset):
                 "parallax": str(path.with_name(base_name + "_parallax.png")),
                 "metallic": str(path.with_name(base_name + "_metallic.png")),
                 "roughness": str(path.with_name(base_name + "_roughness.png")),
+                "poisson_blur": str(path.with_name(base_name + "_poisson_blur.png")),
             }
             all_samples.append(sample)
 
@@ -132,6 +133,12 @@ class SkyrimDataset(Dataset):
             sample["roughness"] = Image.open(sample["roughness"]).convert("L")
         else:
             sample["roughness"] = None
+
+        if Path(sample["poisson_blur"]).exists():
+            # Load the Poisson blur as a numpy array
+            sample["poisson_blur"] = Image.open(sample["poisson_blur"]).convert("I;16")
+        else:
+            sample["poisson_blur"] = None
 
         # sample["specular"] = Image.open(sample["specular"]).convert("RGB")
 

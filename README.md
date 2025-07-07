@@ -39,28 +39,51 @@ _Save the **best A2** checkpoint → encoder donor for Maps._
 
 ## 3. Separate Unet per map (M)
 
-|         Phase | Dataset   | Encoder init           | Trainables        | **Crop / Feed (px)** | Epochs | Optimiser & LR                                | Scheduler              | Core losses |
-| ------------: | --------- | ---------------------- | ----------------- | -------------------- | -----: | --------------------------------------------- | ---------------------- | ----------- |
-|        **M0** | 100 % Sky | best A2 (strict False) | enc + dec + heads | **768**              |      6 | AdamW: enc 5e‑5 (LLRD 0.8^d) · dec/heads 2e‑4 | cosine‑6,eta_min=5e-6  | See table   |
-|        **M1** | 100 % Sky | from M0                | enc + dec + heads | **1 024**            |     12 | AdamW: enc 8e‑6 (LLRD) · dec/heads 3e‑5       | cosine‑12,eta_min=1e-6 | same        |
-| **M1-height** | 100 % Sky | from M0                | enc + dec + heads | **1 024**            |     16 | AdamW: enc 8e‑6 (LLRD) · dec/heads 3e‑5       | cosine‑16,eta_min=5e-7 | same        |
+## 3.1 Roughness & Metallic:
 
-## 3.1 Unet-Maps losses
+Import weights from A2, re-init first conv (kaiming normal on conv.weight)
 
-| Head   | Loss                                                                 |
-| ------ | -------------------------------------------------------------------- |
-| Rough  | L1 + 0.1 MS-SSIM + 0.02 Sobel                                        |
-| Metal  | Focal BCE + 0.2 L1 + 0.05 Sobel + 0.5 Dice                           |
-| AO     | L1 + 0.1 MS-SSIM + 0.15 Sobel                                        |
-| Height | L1 + 1.0 Grad Diff + 0.005 TV + 0.1 MS-SSIM + 0.1 Normal-Consistency |
+|  Phase | Dataset   | Encoder init           | Trainables        | **Crop / Feed (px)** | Epochs | Optimiser & LR                                | Scheduler              | Core losses |
+| -----: | --------- | ---------------------- | ----------------- | -------------------- | -----: | --------------------------------------------- | ---------------------- | ----------- |
+| **M0** | 100 % Sky | best A2 (strict False) | enc + dec + heads | **768**              |      6 | AdamW: enc 5e‑5 (LLRD 0.9^d) · dec/heads 2e‑4 | cosine‑6,eta_min=5e-6  | See table   |
+| **M1** | 100 % Sky | from M0                | enc + dec + heads | **1 024**            |     12 | AdamW: enc 1e‑5 (LLRD) · dec/heads 4e‑5       | cosine‑12,eta_min=1e-6 | same        |
+
+## 3.2 Height & AO
+
+Start from scratch
+
+| Phase  | Crop | Epochs | Enc LR            | Dec LR | Optimizer | Scheduler                                                                          |
+| ------ | ---- | ------ | ----------------- | ------ | --------- | ---------------------------------------------------------------------------------- |
+| **P0** | 256  | 8      | 1e‑4              | 2e‑4   | AdamW     | warmup linearLR 1 epoch, start_lr=0.3, cosine t_max=epochs-1,eta_min=`enc_lr*0.05` |
+| **P1** | 512  | 8      | 1e‑4 (LLRD 0.8^d) | 2e‑4   | AdamW     | same                                                                               |
+| **P2** | 768  | 14     | 8e‑5 (LLDR 0.8^d) | 1.6e‑4 | AdamW     | same                                                                               |
+| **P3** | 1024 | 4      | frozen            | 1.0e‑4 | AdamW     | same                                                                               |
+
+## 3.4 Unet-Maps input
+
+| Map       | Input                                    |
+| --------- | ---------------------------------------- |
+| height    | normal + mean curvature - poisson-coarse |
+| ao        | normal                                   |
+| roughness | albedo + normal                          |
+| metallic  | albedo                                   |
+
+## 3.5 Per‑map network & loss recipes
+
+| map        | **UNet in‑ch**                               | loss = _λᵢ·termᵢ_                                                                                              |
+| ---------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **Height** | **5** (normal+mean curvature+poisson-corase) | `1.0·L1 + 0.25·GradDiff + 0.06·TV + 0.15->0.10(decay in P2)·Normal‑Reproj + 0.06·MS‑SSIM + 0.1*Laplacian-Pyr ` |
+| **AO**     | 3 (normal)                                   | `1.0·L1 + 0.15·Sobel + 0.1·MS‑SSIM`                                                                            |
+| **Rough**  | 6 (albedo+normal)                            | `1.0·L1 + 0.1·MS‑SSIM + 0.02·Sobel`                                                                            |
+| **Metal**  | 3 (albedo)                                   | `0.5·Dice + 1.0·Focal‑BCE(γ=2, α=0.75) + 0.1·L1 + 0.05·Sobel`                                                  |
 
 ## 4. Composite‑mosaic rules
 
-| Feed ≤ (px) | Mosaic active? | Grid        | Share (Mat / Sky) |
-| ----------- | -------------- | ----------- | ----------------- |
-| 256         | yes            | 2 × 2 (128) | 30 % / 15 %       |
-| 512         | yes            | 2 × 2 (256) | 25 % / 10 %       |
-| ≥ 768       | **no**         | —           | 0 %               |
+| Feed ≤ (px) | Mosaic active? | Grid        | Share (2 crop / 4 crop) |
+| ----------- | -------------- | ----------- | ----------------------- |
+| 256         | yes            | 2 × 2 (128) | 30 % / 15 %             |
+| 512         | yes            | 2 × 2 (256) | 25 % / 10 %             |
+| ≥ 768       | **no**         | —           | 0 %                     |
 
 ### Metallic scarcity fixes
 

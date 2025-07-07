@@ -39,12 +39,14 @@ def get_random_crop(
     metallic: Optional[Image.Image] = None,
     roughness: Optional[Image.Image] = None,
     ao: Optional[Image.Image] = None,
+    poisson_blur: Optional[Image.Image] = None,
     resize_to: Optional[list[int]] = None,
     augmentations: Optional[bool] = True,
     center_crop: Optional[bool] = False,
 ) -> tuple[
     Image.Image,
     Image.Image,
+    Optional[Image.Image],
     Optional[Image.Image],
     Optional[Image.Image],
     Optional[Image.Image],
@@ -72,6 +74,9 @@ def get_random_crop(
             TF.crop(roughness, i, j, h, w) if roughness is not None else None  # type: ignore
         )
         final_ao = TF.crop(ao, i, j, h, w) if ao is not None else None  # type: ignore
+        final_poisson_blur = (
+            TF.crop(poisson_blur, i, j, h, w) if poisson_blur is not None else None  # type: ignore
+        )
     else:
         final_albedo = TF.center_crop(albedo, size)  # type: ignore
         final_normal = TF.center_crop(normal, size)  # type: ignore
@@ -88,6 +93,9 @@ def get_random_crop(
             TF.center_crop(roughness, size) if roughness is not None else None  # type: ignore
         )
         final_ao = TF.center_crop(ao, size) if ao is not None else None  # type: ignore
+        final_poisson_blur = (
+            TF.center_crop(poisson_blur, size) if poisson_blur is not None else None  # type: ignore
+        )
 
     if augmentations:
         if random.random() < 0.5:
@@ -104,6 +112,9 @@ def get_random_crop(
                 TF.hflip(final_roughness) if final_roughness is not None else None
             )
             final_ao = TF.hflip(final_ao) if final_ao is not None else None
+            final_poisson_blur = (
+                TF.hflip(final_poisson_blur) if final_poisson_blur is not None else None
+            )
 
         if random.random() < 0.5:
             final_albedo = TF.vflip(final_albedo)
@@ -119,6 +130,9 @@ def get_random_crop(
                 TF.vflip(final_roughness) if final_roughness is not None else None
             )
             final_ao = TF.vflip(final_ao) if final_ao is not None else None
+            final_poisson_blur = (
+                TF.vflip(final_poisson_blur) if final_poisson_blur is not None else None
+            )
 
         # if random.random() < 0.5:
         # Don't try to rotate if the size is not square
@@ -148,6 +162,11 @@ def get_random_crop(
             )
             final_ao = (
                 TF.rotate(final_ao, angle=k * 90) if final_ao is not None else None
+            )
+            final_poisson_blur = (
+                TF.rotate(final_poisson_blur, angle=k * 90)
+                if final_poisson_blur is not None
+                else None
             )
 
     if resize_to is not None:
@@ -191,9 +210,18 @@ def get_random_crop(
             if final_ao is not None
             else None
         )
+        final_poisson_blur = (
+            TF.resize(
+                final_poisson_blur,
+                resize_to,
+                interpolation=TF.InterpolationMode.BILINEAR,
+            )
+            if final_poisson_blur is not None
+            else None
+        )
 
     # image not tensors
-    return final_albedo, final_normal, final_diffuse, final_height, final_metallic, final_roughness, final_ao  # type: ignore
+    return final_albedo, final_normal, final_diffuse, final_height, final_metallic, final_roughness, final_ao, final_poisson_blur  # type: ignore
 
 
 def make_grain_noise(mask_size: tuple[int, int], strength: float = 0.05) -> Image.Image:

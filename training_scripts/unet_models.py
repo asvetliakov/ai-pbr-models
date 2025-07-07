@@ -61,10 +61,15 @@ class FiLM(nn.Module):
     to channel‑wise γ (scale) and β (shift) parameters.
     """
 
-    def __init__(self, cond_ch: int, target_ch: int):
+    def __init__(self, cond_ch: int, target_ch: int, kernel_size: int = 1):
         super().__init__()
-        self.to_gamma = nn.Conv2d(cond_ch, target_ch, 1)
-        self.to_beta = nn.Conv2d(cond_ch, target_ch, 1)
+        pad = kernel_size // 2
+        self.to_gamma = nn.Conv2d(
+            cond_ch, target_ch, kernel_size=kernel_size, padding=pad
+        )
+        self.to_beta = nn.Conv2d(
+            cond_ch, target_ch, kernel_size=kernel_size, padding=pad
+        )
 
     def forward(self, x, cond):
         gamma = torch.tanh(self.to_gamma(cond))  # keep scale in [-1,1]
@@ -105,7 +110,7 @@ class _UNetBackbone(nn.Module):
         # Segformer FiLM
         self.film = FiLM(cond_ch, base * 2**depth) if cond_ch is not None else None
         # Late-fusion mask FiLM
-        self.mask_film = FiLM(1, base * 2**depth) if mask_film else None
+        self.mask_film = FiLM(1, base * 2**depth, kernel_size=3) if mask_film else None
 
         if self.mask_film is not None:
             # initialize so mask has near-zero influence at start

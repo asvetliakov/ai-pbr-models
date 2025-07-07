@@ -1,6 +1,7 @@
 # Ensure we import it here to set random(seed)
 import seed
 import json, torch
+import random
 import multiprocessing
 import torch.nn.functional as F
 import argparse
@@ -8,10 +9,11 @@ import math
 from skyrim_dataset import SkyrimDataset
 from unet_models import UNetSingleChannel, UNetAlbedo
 from pathlib import Path
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+import numpy as np
 from torchvision.utils import save_image
-from torchvision.transforms import functional as TF
+from torchvision.transforms import functional as TF, RandomErasing
 from torchmetrics import functional as FM
 from transformers.utils.constants import (
     IMAGENET_STANDARD_MEAN,
@@ -84,7 +86,7 @@ UNET_MAP = args.map_to_train
 print(f"Training phase: {args.phase}, map to train: {UNET_MAP}")
 
 # HYPER_PARAMETERS
-EPOCHS = 6  # Number of epochs to train
+EPOCHS = 14  # Number of epochs to train
 # LR = 1e-3  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
@@ -146,17 +148,37 @@ resume_training = args.resume
 
 
 def get_model():
-    unet = UNetSingleChannel(
-        in_ch=6,  # RGB + Normal
-        cond_ch=512,  # Condition channel size, can be adjusted
-    ).to(
-        device
-    )  # type: ignore
+    unet = UNetSingleChannel(in_ch=5, cond_ch=512).to(device)  # type: ignore
 
     if args.weight_donor is not None:
         weight_donor_path = Path(args.weight_donor).resolve()
         print(f"Loading model from weight donor: {weight_donor_path}")
         weight_donor_checkpoint = torch.load(weight_donor_path, map_location=device)
+
+        # print("Taking normal channels for convolution")
+        # w_old = weight_donor_checkpoint["unet_albedo_model_state_dict"][
+        #     "unet.inc.conv.0.weight"
+        # ]  # torch.Size([64, 6, 3, 3])
+
+        # # Take normal channels from A2 weights
+        # w_norm = w_old[:, 3:, :, :].clone()  # torch.Size([64, 3, 3, 3])
+
+        # if UNET_MAP == "parallax":
+        #     albedo_gray = torch.empty(
+        #         (w_old.size(0), 1, *w_old.shape[2:]),
+        #         device=w_old.device,
+        #         dtype=w_old.dtype,
+        #     )
+        #     torch.nn.init.kaiming_normal_(albedo_gray, mode="fan_out")
+        #     w_new = torch.cat([w_norm, albedo_gray], dim=1)  # shape [64,4,3,3]
+        # else:
+        # w_new = w_norm  # shape [64,3,3,3]
+
+        # Replace
+        # weight_donor_checkpoint["unet_albedo_model_state_dict"][
+        #     "unet.inc.conv.0.weight"
+        # ] = w_new
+
         unet.load_state_dict(
             weight_donor_checkpoint["unet_albedo_model_state_dict"], strict=False
         )
@@ -228,18 +250,22 @@ def transform_train_fn(example):
     ao = example["ao"]
     metallic = example["metallic"]
     roughness = example["roughness"]
+    poisson_blur = example["poisson_blur"]
 
-    albedo, normal, diffuse, parallax, metallic, roughness, ao = get_random_crop(
-        albedo,
-        normal,
-        size=(CROP_SIZE, CROP_SIZE),
-        diffuse=diffuse,
-        height=parallax,
-        ao=ao,
-        metallic=metallic,
-        roughness=roughness,
-        augmentations=True,
-        resize_to=None,
+    albedo, normal, diffuse, parallax, metallic, roughness, ao, poisson_blur = (
+        get_random_crop(
+            albedo,
+            normal,
+            size=(CROP_SIZE, CROP_SIZE),
+            diffuse=diffuse,
+            height=parallax,
+            ao=ao,
+            metallic=metallic,
+            roughness=roughness,
+            poisson_blur=poisson_blur,
+            augmentations=True,
+            resize_to=None,
+        )
     )
 
     albedo_orig = albedo
@@ -274,6 +300,18 @@ def transform_train_fn(example):
 
     parallax = TF.to_tensor(parallax) if parallax is not None else torch.zeros_like(ao)
 
+    if poisson_blur is not None:
+        poisson_blur_arr = np.array(poisson_blur, dtype=np.uint16)
+        poisson_blur_arr = (
+            poisson_blur_arr.astype(np.float32) / 65535.0
+        )  # Normalize to [0,1]
+
+        poisson_blur = torch.from_numpy(poisson_blur_arr).unsqueeze(0)
+        # Normalize to [-1, 1]
+        poisson_blur = (poisson_blur - 0.5) * 2.0
+    else:
+        poisson_blur = torch.zeros((1, CROP_SIZE, CROP_SIZE), dtype=torch.float32)
+
     return {
         # Unet-albedo input
         "diffuse_and_normal": diffuse_and_normal,
@@ -291,11 +329,13 @@ def transform_train_fn(example):
         "metallic": metallic,
         # GT roughness
         "roughness": roughness,
+        "poisson_blur": poisson_blur,
         "name": name,
     }
 
 
 def transform_val_fn(example):
+    name = example["name"]
     albedo = example["basecolor"]
     normal = example["normal"]
     name = example["name"]
@@ -304,6 +344,7 @@ def transform_val_fn(example):
     ao = example["ao"]
     metallic = example["metallic"]
     roughness = example["roughness"]
+    poisson_blur = example["poisson_blur"]
 
     albedo = center_crop(
         albedo,
@@ -358,6 +399,17 @@ def transform_val_fn(example):
         interpolation=TF.InterpolationMode.BILINEAR,
     )
 
+    poisson_blur = (
+        center_crop(
+            poisson_blur,
+            size=(CROP_SIZE, CROP_SIZE),
+            resize_to=None,
+            interpolation=TF.InterpolationMode.BILINEAR,
+        )
+        if poisson_blur is not None
+        else None
+    )
+
     albedo_orig = albedo
     albedo_segformer = albedo
     diffuse_orig = diffuse
@@ -390,6 +442,18 @@ def transform_val_fn(example):
     diffuse_orig = TF.to_tensor(diffuse_orig)  # type: ignore
     normal_orig = TF.to_tensor(normal_orig)  # type: ignore
 
+    if poisson_blur is not None:
+        poisson_blur_arr = np.array(poisson_blur, dtype=np.uint16)
+        poisson_blur_arr = (
+            poisson_blur_arr.astype(np.float32) / 65535.0
+        )  # Normalize to [0,1]
+
+        poisson_blur = torch.from_numpy(poisson_blur_arr).unsqueeze(0)
+        # Normalize to [-1, 1]
+        poisson_blur = (poisson_blur - 0.5) * 2.0
+    else:
+        poisson_blur = torch.zeros((1, CROP_SIZE, CROP_SIZE), dtype=torch.float32)
+
     return {
         # Unet-albedo input
         "diffuse_and_normal": diffuse_and_normal,
@@ -411,6 +475,7 @@ def transform_val_fn(example):
         "orig_diffuse": diffuse_orig,
         # GT normal, used for visualization
         "orig_normal": normal_orig,
+        "poisson_blur": poisson_blur,
         "name": name,
     }
 
@@ -422,9 +487,7 @@ def gradient_difference_loss(pred, gt):
     dh_pred_y = torch.abs(pred[:, :, :, 1:] - pred[:, :, :, :-1])
     dh_gt_x = torch.abs(gt[:, :, 1:, :] - gt[:, :, :-1, :])
     dh_gt_y = torch.abs(gt[:, :, :, 1:] - gt[:, :, :, :-1])
-    return (
-        F.l1_loss(dh_pred_x, dh_gt_x).float() + F.l1_loss(dh_pred_y, dh_gt_y).float()
-    ) * 0.5
+    return F.l1_loss(dh_pred_x, dh_gt_x).float() + F.l1_loss(dh_pred_y, dh_gt_y).float()
 
 
 def edge_aware_sobel_loss(pred, gt):
@@ -466,13 +529,7 @@ def tv2_loss(x: torch.Tensor) -> torch.Tensor:
     return loss_x + loss_y
 
 
-def normal_consistency_loss(
-    pred: torch.Tensor, normal_map: torch.Tensor
-) -> torch.Tensor:
-    """
-    pred:       (B,1,H,W) predicted height ∈ [0,1]
-    normal_map: (B,3,H,W) input normals ∈ [-1,1]
-    """
+def sobel_to_normal(pred: torch.Tensor) -> torch.Tensor:
     # 1) cast to float32 for stable Sobel
     H32 = pred.to(torch.float32)
 
@@ -487,14 +544,57 @@ def normal_consistency_loss(
     N_pred = torch.cat([-dx, +dy, nz], dim=1)
     N_pred = F.normalize(N_pred, dim=1)
 
-    # 4) ensure input normals are float32 & unit
+    return N_pred
+
+
+def normal_consistency_loss(
+    pred: torch.Tensor, normal_map: torch.Tensor
+) -> torch.Tensor:
+    """
+    pred:       (B,1,H,W) predicted height ∈ [0,1]
+    normal_map: (B,3,H,W) input normals ∈ [-1,1]
+    """
+    N_pred = sobel_to_normal(pred)
+
+    # ensure input normals are float32 & unit
     N_in = F.normalize(normal_map.to(torch.float32), dim=1)
 
-    # 5) cosine‐distance
+    # cosine‐distance
     cos = (N_pred * N_in).sum(dim=1)  # (B,H,W)
     loss = (1.0 - cos).mean()
 
     return loss
+
+
+def normal_reprojection_loss(
+    pred: torch.Tensor, normal_map: torch.Tensor
+) -> torch.Tensor:
+    """
+    pred:       (B,1,H,W) predicted height ∈ [0,1]
+    normal_map: (B,3,H,W) input normals ∈ [-1,1]
+    """
+    N_pred = sobel_to_normal(pred)
+
+    # ensure input normals are float32 & unit
+    N_in = F.normalize(normal_map.to(torch.float32), dim=1)
+
+    # reprojection loss
+    reproj_loss = F.l1_loss(N_pred, N_in)
+
+    return reproj_loss
+
+
+def laplacian_pyramid(img, levels=3):
+    pyr, cur = [], img
+    for _ in range(levels):
+        lo = F.avg_pool2d(cur, 2)
+        hi = cur - F.interpolate(
+            lo, scale_factor=2, mode="bilinear", align_corners=False
+        )
+        pyr.append(hi)
+        cur = lo
+    pyr.append(cur)
+    return pyr  # list of tensors
 
 
 def focal_bce_with_logits(pred, targets, gamma=2.0, pos_weight=None, reduction="mean"):
@@ -654,10 +754,10 @@ def calculate_height_loss(
     if epoch_data[key].get("total_loss") is None:
         epoch_data[key]["l1_loss"] = 0.0
         epoch_data[key]["tv"] = 0.0
-        # epoch_data[key]["tv2"] = 0.0
-        epoch_data[key]["normal_consistency_loss"] = 0.0
         epoch_data[key]["grad_diff_loss"] = 0.0
         epoch_data[key]["ssim_loss"] = 0.0
+        epoch_data[key]["reproj_loss"] = 0.0
+        epoch_data[key]["lp_loss"] = 0.0
         epoch_data[key]["total_loss"] = 0.0
 
     prob = torch.sigmoid(pred)
@@ -690,18 +790,47 @@ def calculate_height_loss(
     # tv2 = tv2_loss(pred)
     # epoch_data[key]["tv2"] += tv2.item()
 
-    normal_loss = normal_consistency_loss(prob, normal_map)
-    epoch_data[key]["normal_consistency_loss"] += normal_loss.item()
+    # normal_loss = normal_consistency_loss(prob, normal_map)
+    # epoch_data[key]["normal_consistency_loss"] += normal_loss.item()
+
+    # linear decay 0->6 epochs: 0.25 → 0.1, then flat
+    # normal_loss_weight = 0.25 if epoch < 6 else 0.10
+    # normal_loss_weight = 0.25 - (0.25 - 0.10) * min(epoch, 6) / 6
+
+    # Variance matching loss
+    # pred_std = prob.view(prob.size(0), -1).std(dim=1).float()
+    # gt_std = gt.view(gt.size(0), -1).std(dim=1).float()
+
+    # var_loss = ((pred_std - gt_std).pow(2)).mean()
+    # epoch_data[key]["var_loss"] += var_loss.item()
+
+    reproj_loss = normal_reprojection_loss(prob, normal_map)
+    if PHASE == "p0" or PHASE == "p1":
+        reproj_weight = 0.15
+    elif PHASE == "p2":
+        reproj_weight = 0.10
+    else:
+        reproj_weight = 0.10
+
+    epoch_data[key]["reproj_loss"] += reproj_loss.item()
+
+    lp_pred = laplacian_pyramid(prob)
+    lp_gt = laplacian_pyramid(gt)
+
+    loss_lp = sum(
+        F.l1_loss(a, b) * (2**-i) for i, (a, b) in enumerate(zip(lp_pred, lp_gt))
+    )
+    epoch_data[key]["lp_loss"] += loss_lp.item()  # type: ignore
 
     loss_height = (
         l1_height
-        + 1.0 * height_grad_diff_loss
-        + 0.005 * tv
-        # + 0.005 * tv2
-        + 0.1 * height_ssim_loss
-        # + 0.05 * normal_loss
-        + 0.1 * normal_loss
+        + 0.25 * height_grad_diff_loss
+        + 0.06 * tv
+        + 0.06 * height_ssim_loss
+        + reproj_weight * reproj_loss
+        + 0.1 * loss_lp
     )
+
     epoch_data[key]["total_loss"] += loss_height.item()
     return loss_height
 
@@ -746,6 +875,41 @@ def to_rgb(x):
     return x.repeat(3, 1, 1)
 
 
+def mean_curvature_map(normals: torch.Tensor) -> torch.Tensor:
+    """
+    normals: (B,3,H,W) in [-1,1]
+    returns: (B,1,H,W) curvature map in [-1,1]
+    """
+
+    # 1) Median-filter to kill salt-and-pepper spikes
+    #    (kernel size 3x3 on each channel)
+    normals = K.filters.median_blur(normals, (3, 3))
+
+    # 2) Compute Sobel gradients → shape (B,2,3,H,W)
+    grad = K.filters.spatial_gradient(normals, mode="sobel", order=1)
+    grad_x, grad_y = grad[:, 0], grad[:, 1]  # each (B,3,H,W)
+
+    # 3) Approximate mean curvature = 0.5*(∂x n_x + ∂y n_y)
+    dnx_dx = grad_x[:, 0:1]  # (B,1,H,W)
+    dny_dy = grad_y[:, 1:2]  # (B,1,H,W)
+    curv = 0.5 * (dnx_dx + dny_dy)
+
+    # 4) Absolute value → all positive
+    curv = curv.abs()  # (B,1,H,W)
+
+    # 5) Percentile-normalize per-image (99th percentile)
+    #    Flatten spatial dims, compute per-sample 99% value
+    flat = curv.view(curv.shape[0], -1)
+    p99 = torch.quantile(flat, 0.99, dim=1)  # (B,)
+    p99 = p99.view(-1, 1, 1, 1).clamp(min=1e-6)  # avoid zero
+    curv = (curv / p99).clamp(0.0, 1.0)
+
+    # Remap to -1 to 1 range
+    curv = (curv - 0.5) * 2.0
+
+    return curv
+
+
 skyrim_train_dataset.set_transform(transform_train_fn)
 skyrim_validation_dataset.set_transform(transform_val_fn)
 
@@ -761,7 +925,13 @@ def do_train():
     # for param in unet_maps.parameters():
     #     param.requires_grad = False
 
-    # for param in unet_maps.head_h.parameters():
+    # for param in unet_maps.unet.decoder.parameters():
+    #     param.requires_grad = True
+
+    # for param in unet_maps.unet.film.parameters():  # type: ignore
+    #     param.requires_grad = True
+
+    # for param in unet_maps.head.parameters():
     #     param.requires_grad = True
 
     skyrim_train_loader = DataLoader(
@@ -788,46 +958,72 @@ def do_train():
 
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
-    # ❶ encoder with LLRD (0.8^depth)
-    base_enc_lr = 5e-5
-    base_dec_lr = 2e-4
-    # base_enc_lr = 1e-5
-    # base_dec_lr = 5e-5
+    # base_enc_lr = 1e-4
+    # base_dec_lr = 2e-4
+    base_enc_lr = 8e-5
+    base_dec_lr = 1.6e-4
 
+    # ❶ encoder with LLRD (0.8^depth)
+    depth_map = {
+        0: ["unet.inc."],
+        1: ["unet.encoder.0."],
+        2: ["unet.encoder.1."],
+        3: ["unet.encoder.2."],
+        4: ["unet.bot."],
+    }
+
+    n_blocks = len(depth_map)
     param_groups = []
-    depth = len(unet_maps.unet.encoder)
-    for i, block in enumerate(unet_maps.unet.encoder):
-        lr_i = base_enc_lr * (0.8 ** (depth - i - 1))
-        param_groups.append(
-            {
-                "params": block.parameters(),
-                "lr": lr_i,
-                "weight_decay": WD,
-            }
-        )
+    gamma = 0.8
+    for depth, prefixes in depth_map.items():
+        lr = base_enc_lr * (gamma ** (n_blocks - depth - 1))
+        params = [
+            p
+            for n, p in unet_maps.named_parameters()
+            if any(n.startswith(pref) for pref in prefixes)
+        ]
+        param_groups.append({"params": params, "lr": lr, "weight_decay": WD})
 
     # decoder + film + each head all at base_dec_lr
     param_groups += [
+        # {
+        #     "params": unet_maps.unet.encoder.parameters(),
+        #     "lr": base_enc_lr,
+        #     "weight_decay": WD,
+        # },
+        # {
+        #     "params": unet_maps.unet.inc.parameters(),
+        #     "lr": base_enc_lr,
+        #     "weight_decay": WD,
+        # },
+        # {
+        #     "params": unet_maps.unet.bot.parameters(),
+        #     "lr": base_enc_lr,
+        #     "weight_decay": WD,
+        # },
         {
             "params": unet_maps.unet.decoder.parameters(),
             "lr": base_dec_lr,
             "weight_decay": WD,
         },
         {"params": unet_maps.unet.film.parameters(), "lr": base_dec_lr, "weight_decay": 0.0},  # type: ignore # No WD for FiLM
+        # {"params": unet_maps.unet.mask_film.parameters(), "lr": base_dec_lr, "weight_decay": 0.0},  # type: ignore # No WD for FiLM
         {
             "params": unet_maps.head.parameters(),
             "lr": base_dec_lr,
             "weight_decay": WD,
         },
     ]
+    # for n, p in unet_maps.named_parameters():
+    #     print(f"Param: {n}")
 
     # trainable = [p for p in unet_maps.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
         param_groups,
         # trainable,
         # param_groups,
-        # lr=LR,
-        # weight_decay=0.0,
+        # lr=base_dec_lr,
+        # weight_decay=WD,
         betas=(0.9, 0.999),
         eps=1e-8,
     )
@@ -835,8 +1031,22 @@ def do_train():
         print("Loading optimizer state from checkpoint.")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=5e-6
+    # 1 epoch warm-up to the base LR
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.3, end_factor=1.0, total_iters=STEPS_PER_EPOCH_TRAIN
+    )
+
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=(EPOCHS - 1) * STEPS_PER_EPOCH_TRAIN,
+        # eta_min=base_enc_lr * 0.05,
+        eta_min=base_dec_lr * 0.05,
+    )
+
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup, cosine],
+        milestones=[STEPS_PER_EPOCH_TRAIN],  # After first epoch switch to cosine
     )
 
     if checkpoint is not None and resume_training:
@@ -847,6 +1057,12 @@ def do_train():
     if checkpoint is not None and resume_training:
         print("Loading scaler state from checkpoint.")
         scaler.load_state_dict(checkpoint["scaler_state_dict"])
+
+    # for pg in optimizer.param_groups:
+    #     pg["lr"] = pg["lr"] * 0.1
+    #     print(
+    #         f"Param group: {pg['params'][0].name}, LR: {pg['lr']:.1e}, WD: {pg['weight_decay']}"
+    #     )
 
     best_val_loss = float("inf")
     if checkpoint is not None and args.load_best_loss and resume_training:
@@ -891,6 +1107,7 @@ def do_train():
             diffuse_and_normal = skyrim_batch["diffuse_and_normal"]
             albedo_and_normal_segformer = skyrim_batch["albedo_and_normal_segformer"]
             normal = skyrim_batch["normal"]
+            poisson_blur = skyrim_batch["poisson_blur"]
 
             gt = skyrim_batch[UNET_MAP]
 
@@ -899,6 +1116,7 @@ def do_train():
                 device, non_blocking=True
             )
             normal = normal.to(device, non_blocking=True)
+            poisson_blur = poisson_blur.to(device, non_blocking=True)
 
             gt = gt.to(device, non_blocking=True)
 
@@ -922,11 +1140,20 @@ def do_train():
             )
             predicted_albedo = predicted_albedo.to(device, non_blocking=True)
 
-            albedo_and_normal = torch.cat((predicted_albedo, normal), dim=1)
+            if UNET_MAP == "parallax":
+                curvature = mean_curvature_map(normal)
+                input = torch.cat(
+                    [
+                        normal,
+                        curvature,
+                        poisson_blur,
+                    ],
+                    dim=1,
+                )
 
             with autocast(device_type=device.type):
                 # Get predicted map from UNet
-                predicted = unet_maps(albedo_and_normal, seg_feats)
+                predicted = unet_maps(input, seg_feats)
 
             loss = get_loss(
                 predicted,
@@ -945,6 +1172,8 @@ def do_train():
 
             # loss = loss / accum_steps  # Scale loss for accumulation
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(unet_maps.parameters(), 1.0)
 
             scaler.step(optimizer)
             scaler.update()
@@ -953,7 +1182,7 @@ def do_train():
             #     scaler.step(optimizer)
             #     scaler.update()
             #     optimizer.zero_grad(set_to_none=True)
-            # scheduler.step()
+            scheduler.step()
 
         calculate_avg(epoch_data, key="train")
 
@@ -979,6 +1208,7 @@ def do_train():
                 albedo_gt = skyrim_batch["albedo"]
                 diffuse_gt = skyrim_batch["orig_diffuse"]
                 normal_gt = skyrim_batch["orig_normal"]
+                poisson_blur = skyrim_batch["poisson_blur"]
 
                 gt = skyrim_batch[UNET_MAP]
 
@@ -990,6 +1220,7 @@ def do_train():
                 diffuse_gt = diffuse_gt.to(device, non_blocking=True)
                 normal_gt = normal_gt.to(device, non_blocking=True)
                 albedo_gt = albedo_gt.to(device, non_blocking=True)
+                poisson_blur = poisson_blur.to(device, non_blocking=True)
 
                 gt = gt.to(device, non_blocking=True)
 
@@ -1006,7 +1237,7 @@ def do_train():
                         diffuse_and_normal, seg_feats
                     ).detach()
 
-                predicted_albedo_orig = predicted_albedo
+                # predicted_albedo_orig = predicted_albedo
                 predicted_albedo = TF.normalize(
                     predicted_albedo,
                     mean=IMAGENET_STANDARD_MEAN,
@@ -1014,11 +1245,20 @@ def do_train():
                 )
                 predicted_albedo = predicted_albedo.to(device, non_blocking=True)
 
-                albedo_and_normal = torch.cat((predicted_albedo, normal), dim=1)
+                if UNET_MAP == "parallax":
+                    curvature = mean_curvature_map(normal)
+                    input = torch.cat(
+                        [
+                            normal,
+                            curvature,
+                            poisson_blur,
+                        ],
+                        dim=1,
+                    )
 
                 with autocast(device_type=device.type):
                     # Get predicted map from UNet
-                    predicted = unet_maps(albedo_and_normal, seg_feats)
+                    predicted = unet_maps(input, seg_feats)
 
                 get_loss(
                     predicted,
@@ -1038,17 +1278,17 @@ def do_train():
                         sample_name,
                         sample_diffuse,
                         sample_normal,
-                        sample_albedo_gt,
+                        # sample_albedo_gt,
                         gt,
-                        sample_albedo_pred,
+                        # sample_albedo_pred,
                         predicted,
                     ) in zip(
                         name,
                         diffuse_gt,
                         normal_gt,
-                        albedo_gt,
+                        # albedo_gt,
                         gt,
-                        predicted_albedo_orig,
+                        # predicted_albedo_orig,
                         predicted,
                     ):
 
@@ -1060,7 +1300,7 @@ def do_train():
                             [
                                 sample_diffuse,
                                 sample_normal,
-                                sample_albedo_gt,
+                                # sample_albedo_gt,
                                 to_rgb(gt),
                             ],
                             dim=2,  # Concatenate along width
@@ -1069,7 +1309,7 @@ def do_train():
                             [
                                 sample_diffuse,
                                 sample_normal,
-                                sample_albedo_pred,
+                                # sample_albedo_pred,
                                 to_rgb(torch.sigmoid(predicted)),
                             ],
                             dim=2,  # Concatenate along width
@@ -1091,7 +1331,7 @@ def do_train():
 
         unet_total_val_loss = calculate_avg(epoch_data, key="validation")
 
-        scheduler.step()
+        # scheduler.step()
         print(json.dumps(epoch_data, indent=4))
 
         # Save checkopoint after each epoch
