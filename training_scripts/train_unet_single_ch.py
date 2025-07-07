@@ -172,41 +172,28 @@ def get_model():
         print(f"Loading model from weight donor: {weight_donor_path}")
         weight_donor_checkpoint = torch.load(weight_donor_path, map_location=device)
 
-        # print("Taking normal channels for convolution")
-        # w_old = weight_donor_checkpoint["unet_albedo_model_state_dict"][
-        #     "unet.inc.conv.0.weight"
-        # ]  # torch.Size([64, 6, 3, 3])
+        if UNET_MAP == "metallic":
+            w_old = weight_donor_checkpoint["unet_albedo_model_state_dict"][
+                "unet.inc.conv.0.weight"
+            ]  # torch.Size([64, 6, 3, 3])
+            # Take RGB channels from A2 weights
+            w_new = w_old[:, :3, :, :].clone()  # torch.Size([64, 3, 3, 3])
 
-        # # Take normal channels from A2 weights
-        # w_norm = w_old[:, 3:, :, :].clone()  # torch.Size([64, 3, 3, 3])
-
-        # if UNET_MAP == "parallax":
-        #     albedo_gray = torch.empty(
-        #         (w_old.size(0), 1, *w_old.shape[2:]),
-        #         device=w_old.device,
-        #         dtype=w_old.dtype,
-        #     )
-        #     torch.nn.init.kaiming_normal_(albedo_gray, mode="fan_out")
-        #     w_new = torch.cat([w_norm, albedo_gray], dim=1)  # shape [64,4,3,3]
-        # else:
-        # w_new = w_norm  # shape [64,3,3,3]
-
-        # Replace
-        # weight_donor_checkpoint["unet_albedo_model_state_dict"][
-        #     "unet.inc.conv.0.weight"
-        # ] = w_new
+            weight_donor_checkpoint["unet_albedo_model_state_dict"][
+                "unet.inc.conv.0.weight"
+            ] = w_new
 
         unet.load_state_dict(
             weight_donor_checkpoint["unet_albedo_model_state_dict"], strict=False
         )
 
-        # ! Set metal bias # to a value that corresponds to 15% metal pixels in the dataset to prevent early collapse
+        # ! Set metal bias # to a value that corresponds to 10% metal pixels in the dataset to prevent early collapse
         # Doing this only on the first init on the first phase. If we're setting weight donor then we're at the first phase
         if UNET_MAP == "metallic":
-            p0 = 0.15
+            p0 = 0.10
             b0 = -math.log((1 - p0) / p0)
             with torch.no_grad():
-                torch.nn.init.constant_(unet.out.bias, b0)  # type: ignore
+                torch.nn.init.constant_(unet.head.bias, b0)  # type: ignore
 
     checkpoint = None
     if (args.load_checkpoint is not None) and Path(
@@ -524,6 +511,12 @@ def edge_aware_sobel_loss(pred, gt):
 
 def dice_loss(pred, gt, eps=1e-6):
     # pred, gt in [0,1], shape (B,1,H,W)
+    # if gt.sum() == 0:
+    #     return torch.tensor(0.0, device=gt.device)
+    # reward perfect “no-metal” by returning zero loss if pred is also all below threshold
+    # BCE handles FPs
+    # return ((pred > 0.5).sum() == 0).float() * 0.0
+
     intersection = (pred * gt).sum(dim=(1, 2, 3))
     union = pred.sum(dim=(1, 2, 3)) + gt.sum(dim=(1, 2, 3))
     dice_score = (2 * intersection + eps) / (union + eps)
@@ -614,29 +607,27 @@ def laplacian_pyramid(img, levels=3):
     return pyr  # list of tensors
 
 
-def focal_bce_with_logits(pred, targets, gamma=2.0, pos_weight=None, reduction="mean"):
+def focal_bce_with_logits(
+    logits, targets, gamma=2.0, alpha=0.25, pos_weight=None, reduction="mean"
+):
     """
-    Focal BCE for a single-channel (metal) mask.
-
-    logits  : (B,1,H,W) raw network outputs
-    targets : (B,1,H,W) ground-truth ∈ {0,1} or [0,1]
+    α‑balanced focal BCE (Lin et al., 2017).
     """
-    # standard BCE, no reduction yet
     bce = F.binary_cross_entropy_with_logits(
-        pred, targets, pos_weight=pos_weight, reduction="none"
-    )
-    # convert logits → probability of the *true* class
-    pred = pred * targets + (1.0 - pred) * (1.0 - targets)
+        logits, targets, pos_weight=pos_weight, reduction="none"
+    )  # (B,1,H,W)
+    prob = torch.sigmoid(logits)
+    p_t = prob * targets + (1 - prob) * (1 - targets)
 
-    focal_factor = (1.0 - pred).pow(gamma)  # (B,1,H,W)
-    loss = focal_factor * bce  # shape like bce
+    focal = (1 - p_t).pow(gamma)
+    alpha_t = targets * alpha + (1 - targets) * (1 - alpha)
 
+    loss = alpha_t * focal * bce
     if reduction == "mean":
         return loss.mean()
     elif reduction == "sum":
         return loss.sum()
-    else:  # "none"
-        return loss
+    return loss
 
 
 def focal_l1_loss(pred, gt, alpha=2.0, gamma=1.5, eps=1e-6):
@@ -649,6 +640,23 @@ def focal_l1_loss(pred, gt, alpha=2.0, gamma=1.5, eps=1e-6):
     weight = 1 + alpha * err  # linear focus
     loss = (weight * err.pow(gamma)).mean()  # combine focal & relative
     return loss
+
+
+def focal_tversky_loss(prob, gt, alpha=0.7, beta=0.3, gamma=1.5, eps=1e-6):
+    """
+    Focal‑Tversky (Salehi et al., 2021) – heavy FP penalty when α>β.
+    Works even when gt contains no positive pixels.
+    """
+    prob_flat = prob.view(prob.size(0), -1)
+    gt_flat = gt.view(gt.size(0), -1)
+
+    tp = (prob_flat * gt_flat).sum(dim=1)
+    fp = (prob_flat * (1 - gt_flat)).sum(dim=1)
+    fn = ((1 - prob_flat) * gt_flat).sum(dim=1)
+
+    tversky = (tp + eps) / (tp + alpha * fp + beta * fn + eps)
+    loss = (1 - tversky).pow(gamma)
+    return loss.mean()
 
 
 def calculate_rougness_loss(
@@ -693,50 +701,53 @@ def calculate_metallic_loss(
 ) -> torch.Tensor:
     if epoch_data[key].get("total_loss") is None:
         epoch_data[key]["bce"] = 0
+        epoch_data[key]["tversky"] = 0.0
         epoch_data[key]["l1_loss"] = 0.0
         epoch_data[key]["edge_loss"] = 0.0
-        epoch_data[key]["dice_loss"] = 0.0
+        # epoch_data[key]["dice_loss"] = 0.0
         epoch_data[key]["total_loss"] = 0.0
 
-    metal_positive = gt.float().sum()
+    metal_positive = gt.sum().float()
     metal_negative = (gt.numel() - metal_positive).float()
-    if metal_positive == 0:
-        metal_weights = torch.tensor(1.0, device=device)
-        skip_bce = True
-    else:
-        metal_weights = (
-            ((metal_negative + 1e-6) / (metal_positive + 1e-6))
-            .clamp(min=1.0, max=16.0)
-            .to(device)
-        )
-        skip_bce = False
+    metal_weights = (
+        ((metal_negative + 1e-6) / (metal_positive + 1e-6))
+        .clamp(min=1.0, max=4.0)
+        .to(device)
+    )
 
-    if not skip_bce:
-        bce = focal_bce_with_logits(
-            pred, gt, pos_weight=metal_weights, gamma=2.0, reduction="mean"
-        )
-    else:
-        bce = pred.new_zeros(())
-
-    epoch_data[key]["bce"] += bce.item()
+    # Focal BCE, pixel‑level class‑balance
+    bce_loss = focal_bce_with_logits(
+        pred, gt, gamma=2.0, alpha=0.25, pos_weight=metal_weights, reduction="mean"
+    )
+    epoch_data[key]["bce"] += bce_loss.item()
 
     prob = torch.sigmoid(pred)
 
-    l1_metal_loss = F.l1_loss(prob, gt, reduction="mean").float()
-    epoch_data[key]["l1_loss"] += l1_metal_loss.item()
+    # Tversky loss, region & FP‑heavy penalty
+    tversky_loss = focal_tversky_loss(prob, gt, alpha=0.7, beta=0.3, gamma=1.5)
+    epoch_data[key]["tversky"] += tversky_loss.item()
 
+    # Sobel gradient, crisp borders
     edge_metal_loss = edge_aware_sobel_loss(prob, gt).float()
     epoch_data[key]["edge_loss"] += edge_metal_loss.item()
 
-    dice_metal_loss = dice_loss(prob, gt).float()
-    epoch_data[key]["dice_loss"] += dice_metal_loss.item()
+    # L1, smooth probabilities
+    l1_metal_loss = F.l1_loss(prob, gt, reduction="mean").float()
+    epoch_data[key]["l1_loss"] += l1_metal_loss.item()
 
-    loss_metal = (
-        bce + 0.2 * l1_metal_loss + 0.05 * edge_metal_loss + 0.5 * dice_metal_loss
+    # dice_metal_loss = dice_loss(prob, gt).float()
+    # epoch_data[key]["dice_loss"] += dice_metal_loss.item()
+
+    # Weighted sum of losses
+    total_loss = (
+        1.0 * bce_loss
+        + 0.7 * tversky_loss
+        + 0.05 * edge_metal_loss
+        + 0.05 * l1_metal_loss
     )
-    epoch_data[key]["total_loss"] += loss_metal.item()
+    epoch_data[key]["total_loss"] += total_loss.item()
 
-    return loss_metal
+    return total_loss
 
 
 def calculate_ao_loss(
@@ -1204,6 +1215,10 @@ def do_train():
                     dim=1,
                 )
 
+            if UNET_MAP == "metallic":
+                # For metallic, we use the albedo and normal as input
+                input = predicted_albedo
+
             with autocast(device_type=device.type):
                 # Get predicted map from UNet
                 predicted = unet_maps(input, seg_feats)
@@ -1323,6 +1338,10 @@ def do_train():
                         ],
                         dim=1,
                     )
+
+                if UNET_MAP == "metallic":
+                    # For metallic, we use the albedo and normal as input
+                    input = predicted_albedo
 
                 with autocast(device_type=device.type):
                     # Get predicted map from UNet

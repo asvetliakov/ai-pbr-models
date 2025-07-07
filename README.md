@@ -75,7 +75,7 @@ Start from scratch
 | **Height** | `1.0·L1 + 0.25·GradDiff + 0.06·TV + 0.15->0.10(decay in P2)·Normal‑Reproj + 0.06·MS‑SSIM + 0.1*Laplacian-Pyr ` |
 | **AO**     | `1.0·L1 + 0.15·Sobel + 0.1·MS‑SSIM`                                                                            |
 | **Rough**  | `1.0·Focal-Relative-L1 + 0.1·MS‑SSIM + 0.02·Sobel`                                                             |
-| **Metal**  | `0.5·Dice + 1.0·Focal‑BCE(γ=2, α=0.75) + 0.1·L1 + 0.05·Sobel`                                                  |
+| **Metal**  | `1.0*Focal BCE(a=0.25, g=2.0) + 0.7*Focal-Tversky(a=0.7, b=0.3, g=1.5) + 0.05*Sobel + 0.05*L1`                 |
 
 ## 4. Composite‑mosaic rules
 
