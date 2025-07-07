@@ -9,6 +9,8 @@ from scipy.ndimage import gaussian_filter
 
 BASE_DIR = Path(__file__).resolve().parent
 
+# INPUT_DIR = (BASE_DIR / "../skyrim_samples_for_maps").resolve()
+# OUTPUT_DIR = (BASE_DIR / "../skyrim_processed_for_maps").resolve()
 INPUT_DIR = (BASE_DIR / "../skyrim_samples").resolve()
 OUTPUT_DIR = (BASE_DIR / "../skyrim_processed").resolve()
 

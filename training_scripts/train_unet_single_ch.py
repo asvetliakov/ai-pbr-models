@@ -86,7 +86,7 @@ UNET_MAP = args.map_to_train
 print(f"Training phase: {args.phase}, map to train: {UNET_MAP}")
 
 # HYPER_PARAMETERS
-EPOCHS = 5  # Number of epochs to train
+EPOCHS = 7  # Number of epochs to train
 # LR = 1e-3  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
@@ -132,10 +132,10 @@ skyrim_validation_dataset.all_validation_samples = (
     skyrim_train_dataset.all_validation_samples
 )
 
-CROP_SIZE = 1024
+CROP_SIZE = 768
 
-BATCH_SIZE = 4
-BATCH_SIZE_VALIDATION = 4
+BATCH_SIZE = 6
+BATCH_SIZE_VALIDATION = 6
 
 SKYRIM_PHOTOMETRIC = 0.0
 
@@ -156,7 +156,12 @@ resume_training = args.resume
 
 
 def get_model():
+    # AO, height
     unet_channels = 5
+    if UNET_MAP == "roughness":
+        unet_channels = 6
+    elif UNET_MAP == "metallic":
+        unet_channels = 3
 
     unet = UNetSingleChannel(in_ch=unet_channels, cond_ch=512).to(device)  # type: ignore
 
@@ -632,6 +637,18 @@ def focal_bce_with_logits(pred, targets, gamma=2.0, pos_weight=None, reduction="
         return loss
 
 
+def focal_l1_loss(pred, gt, alpha=2.0, gamma=1.5, eps=1e-6):
+    """
+    pred, gt: (B,C,H,W) tensors
+    alpha: weight factor for error-based scaling
+    gamma: focal exponent
+    """
+    err = torch.abs(pred - gt) + eps  # (B,C,H,W)
+    weight = 1 + alpha * err  # linear focus
+    loss = (weight * err.pow(gamma)).mean()  # combine focal & relative
+    return loss
+
+
 def calculate_rougness_loss(
     pred: torch.Tensor,
     gt: torch.Tensor,
@@ -653,7 +670,8 @@ def calculate_rougness_loss(
     ssim_rough_loss = (1 - ssim_rough).float()
     epoch_data[key]["ssim_loss"] += ssim_rough_loss.item()
 
-    l1_rough = F.l1_loss(prob, gt).float()
+    # l1_rough = F.l1_loss(prob, gt).float()
+    l1_rough = focal_l1_loss(prob, gt, alpha=1.5, gamma=1.5, eps=1e-6).float()
     epoch_data[key]["l1_loss"] += l1_rough.item()
 
     loss_edge = edge_aware_sobel_loss(prob, gt)
@@ -932,17 +950,17 @@ def do_train():
 
     unet_maps, segformer, unet_albedo, checkpoint = get_model()
 
-    for param in unet_maps.parameters():
-        param.requires_grad = False
+    # for param in unet_maps.parameters():
+    #     param.requires_grad = False
 
-    for param in unet_maps.unet.decoder.parameters():
-        param.requires_grad = True
+    # for param in unet_maps.unet.decoder.parameters():
+    #     param.requires_grad = True
 
-    for param in unet_maps.unet.film.parameters():  # type: ignore
-        param.requires_grad = True
+    # for param in unet_maps.unet.film.parameters():  # type: ignore
+    #     param.requires_grad = True
 
-    for param in unet_maps.head.parameters():
-        param.requires_grad = True
+    # for param in unet_maps.head.parameters():
+    #     param.requires_grad = True
 
     skyrim_train_loader = DataLoader(
         skyrim_train_dataset,
@@ -968,12 +986,12 @@ def do_train():
 
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
-    # base_enc_lr = 8e-5
-    # base_dec_lr = 1.6e-4
-    # base_enc_lr = 8e-5
-    base_dec_lr = 1e-4
+    # base_enc_lr = 1e-5
+    # base_dec_lr = 4e-5
+    base_enc_lr = 5e-5
+    base_dec_lr = 2e-4
 
-    # ❶ encoder with LLRD (0.8^depth)
+    # ❶ encoder with LLRD
     depth_map = {
         0: ["unet.inc."],
         1: ["unet.encoder.0."],
@@ -984,15 +1002,15 @@ def do_train():
 
     n_blocks = len(depth_map)
     param_groups = []
-    # gamma = 0.8
-    # for depth, prefixes in depth_map.items():
-    #     lr = base_enc_lr * (gamma ** (n_blocks - depth - 1))
-    #     params = [
-    #         p
-    #         for n, p in unet_maps.named_parameters()
-    #         if any(n.startswith(pref) for pref in prefixes)
-    #     ]
-    #     param_groups.append({"params": params, "lr": lr, "weight_decay": WD})
+    gamma = 0.9
+    for depth, prefixes in depth_map.items():
+        lr = base_enc_lr * (gamma ** (n_blocks - depth - 1))
+        params = [
+            p
+            for n, p in unet_maps.named_parameters()
+            if any(n.startswith(pref) for pref in prefixes)
+        ]
+        param_groups.append({"params": params, "lr": lr, "weight_decay": WD})
 
     # decoder + film + each head all at base_dec_lr
     param_groups += [
@@ -1161,6 +1179,15 @@ def do_train():
                     dim=1,
                 )
 
+            if UNET_MAP == "roughness":
+                input = torch.cat(
+                    [
+                        predicted_albedo,
+                        normal,
+                    ],
+                    dim=1,
+                )
+
             with autocast(device_type=device.type):
                 # Get predicted map from UNet
                 predicted = unet_maps(input, seg_feats)
@@ -1262,6 +1289,14 @@ def do_train():
                             normal,
                             curvature,
                             poisson_blur,
+                        ],
+                        dim=1,
+                    )
+                if UNET_MAP == "roughness":
+                    input = torch.cat(
+                        [
+                            predicted_albedo,
+                            normal,
                         ],
                         dim=1,
                     )
