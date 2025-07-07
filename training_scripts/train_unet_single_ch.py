@@ -86,7 +86,7 @@ UNET_MAP = args.map_to_train
 print(f"Training phase: {args.phase}, map to train: {UNET_MAP}")
 
 # HYPER_PARAMETERS
-EPOCHS = 14  # Number of epochs to train
+EPOCHS = 5  # Number of epochs to train
 # LR = 1e-3  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
@@ -132,10 +132,10 @@ skyrim_validation_dataset.all_validation_samples = (
     skyrim_train_dataset.all_validation_samples
 )
 
-CROP_SIZE = 768
+CROP_SIZE = 1024
 
-BATCH_SIZE = 6
-BATCH_SIZE_VALIDATION = 6
+BATCH_SIZE = 4
+BATCH_SIZE_VALIDATION = 4
 
 SKYRIM_PHOTOMETRIC = 0.0
 
@@ -144,11 +144,23 @@ MIN_SAMPLES_VALIDATION = len(skyrim_validation_dataset)
 STEPS_PER_EPOCH_TRAIN = math.ceil(MIN_SAMPLES_TRAIN / BATCH_SIZE)
 STEPS_PER_EPOCH_VALIDATION = math.ceil(MIN_SAMPLES_VALIDATION / BATCH_SIZE_VALIDATION)
 
+DATASET_WORKERS = 4
+if CROP_SIZE == 768:
+    # Batch size 6 for 768
+    DATASET_WORKERS = 8
+elif CROP_SIZE < 768:
+    # Batch size 16 for 512 and 32 for 256
+    DATASET_WORKERS = 12
+
 resume_training = args.resume
 
 
 def get_model():
-    unet = UNetSingleChannel(in_ch=5, cond_ch=512).to(device)  # type: ignore
+    unet_channels = 3
+    if UNET_MAP == "parallax":
+        unet_channels = 5
+
+    unet = UNetSingleChannel(in_ch=unet_channels, cond_ch=512).to(device)  # type: ignore
 
     if args.weight_donor is not None:
         weight_donor_path = Path(args.weight_donor).resolve()
@@ -922,22 +934,22 @@ def do_train():
 
     unet_maps, segformer, unet_albedo, checkpoint = get_model()
 
-    # for param in unet_maps.parameters():
-    #     param.requires_grad = False
+    for param in unet_maps.parameters():
+        param.requires_grad = False
 
-    # for param in unet_maps.unet.decoder.parameters():
-    #     param.requires_grad = True
+    for param in unet_maps.unet.decoder.parameters():
+        param.requires_grad = True
 
-    # for param in unet_maps.unet.film.parameters():  # type: ignore
-    #     param.requires_grad = True
+    for param in unet_maps.unet.film.parameters():  # type: ignore
+        param.requires_grad = True
 
-    # for param in unet_maps.head.parameters():
-    #     param.requires_grad = True
+    for param in unet_maps.head.parameters():
+        param.requires_grad = True
 
     skyrim_train_loader = DataLoader(
         skyrim_train_dataset,
         batch_size=BATCH_SIZE,
-        num_workers=8,
+        num_workers=DATASET_WORKERS,
         prefetch_factor=2,
         shuffle=True,
         pin_memory=True,
@@ -948,7 +960,7 @@ def do_train():
         skyrim_validation_dataset,
         batch_size=BATCH_SIZE_VALIDATION,
         shuffle=False,
-        num_workers=8,
+        num_workers=DATASET_WORKERS,
         pin_memory=True,
         prefetch_factor=2,
         persistent_workers=True,
@@ -960,8 +972,8 @@ def do_train():
 
     # base_enc_lr = 1e-4
     # base_dec_lr = 2e-4
-    base_enc_lr = 8e-5
-    base_dec_lr = 1.6e-4
+    # base_enc_lr = 8e-5
+    base_dec_lr = 1e-4
 
     # ❶ encoder with LLRD (0.8^depth)
     depth_map = {
@@ -974,15 +986,15 @@ def do_train():
 
     n_blocks = len(depth_map)
     param_groups = []
-    gamma = 0.8
-    for depth, prefixes in depth_map.items():
-        lr = base_enc_lr * (gamma ** (n_blocks - depth - 1))
-        params = [
-            p
-            for n, p in unet_maps.named_parameters()
-            if any(n.startswith(pref) for pref in prefixes)
-        ]
-        param_groups.append({"params": params, "lr": lr, "weight_decay": WD})
+    # gamma = 0.8
+    # for depth, prefixes in depth_map.items():
+    #     lr = base_enc_lr * (gamma ** (n_blocks - depth - 1))
+    #     params = [
+    #         p
+    #         for n, p in unet_maps.named_parameters()
+    #         if any(n.startswith(pref) for pref in prefixes)
+    #     ]
+    #     param_groups.append({"params": params, "lr": lr, "weight_decay": WD})
 
     # decoder + film + each head all at base_dec_lr
     param_groups += [
