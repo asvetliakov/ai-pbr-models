@@ -73,7 +73,7 @@ print(f"Training phase: {args.phase}")
 
 # HYPER_PARAMETERS
 EPOCHS = 5  # Number of epochs to train
-LR = 5e-7  # Learning rate for the optimizer
+LR = 1e-6  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
 PHASE = args.phase  # Phase of the training per plan, used for logging and saving
@@ -485,6 +485,9 @@ def do_train():
     for param in unet_alb.out.parameters():
         param.requires_grad = True
 
+    for param in unet_alb.unet.film.parameters():  # type: ignore
+        param.requires_grad = True
+
     # for param in unet_alb.unet.decoder.parameters():
     #     param.requires_grad = True
 
@@ -538,30 +541,35 @@ def do_train():
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
     # enc_params = {"params": unet_alb.unet.encoder.parameters(), "lr": 2e-4}
-    # dec_params = {"params": unet_alb.unet.decoder.parameters(), "lr": 2e-4}
-    # film_params = {"params": unet_alb.unet.film.parameters(), "lr": 3e-4}  # type: ignore
-    # head_params = {"params": unet_alb.out.parameters(), "lr": 2.5e-4}
+    # dec_params = {
+    #     "params": unet_alb.unet.decoder.parameters(),
+    #     "lr": LR,
+    #     "weight_decay": WD,
+    # }
+    film_params = {"params": unet_alb.unet.film.parameters(), "lr": 1e-4, "weight_decay": 0.0}  # type: ignore
+    head_params = {"params": unet_alb.out.parameters(), "lr": LR, "weight_decay": WD}
 
-    trainable = [p for p in unet_alb.parameters() if p.requires_grad]
+    # trainable = [p for p in unet_alb.parameters() if p.requires_grad]
 
     optimizer = torch.optim.AdamW(
-        trainable,
+        # trainable,
+        [film_params, head_params],
         # [enc_params, dec_params, film_params, head_params],
         # filter(lambda p: p.requires_grad, unet_alb.parameters()),
         # lr=LR,
         # weight_decay=WD,
         # [enc_params, dec_params, film_params, head_params],
-        lr=LR,
+        # lr=LR,
         betas=(0.9, 0.999),
         eps=1e-8,
-        weight_decay=WD,
+        # weight_decay=WD,
     )
     if checkpoint is not None and resume_training:
         print("Loading optimizer state from checkpoint.")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    #     optimizer, T_max=EPOCHS, eta_min=1e-6
+    #     optimizer, T_max=EPOCHS, eta_min=LR * 0.1
     # )
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(
