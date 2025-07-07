@@ -1,0 +1,23 @@
+{
+    "epoch": 10,
+    "train": {
+        "batch_count": 294
+    },
+    "validation": {
+        "batch_count": 33
+    },
+    "unet_albedo": {
+        "train": {
+            "l1_loss": 0.03823759489800452,
+            "total_loss": 0.06066284147503019,
+            "ssim_loss": 0.10721330314266439,
+            "lpips": 0.14629895541639554
+        },
+        "validation": {
+            "l1_loss": 0.041356381649772324,
+            "total_loss": 0.063894821048686,
+            "ssim_loss": 0.10902114709218343,
+            "lpips": 0.14545405475479184
+        }
+    }
+}
