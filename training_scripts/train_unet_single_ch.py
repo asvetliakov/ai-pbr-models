@@ -152,6 +152,8 @@ elif CROP_SIZE < 768:
     # Batch size 16 for 512 and 32 for 256
     DATASET_WORKERS = 12
 
+USE_ACCUMULATION = BATCH_SIZE <= 3
+
 resume_training = args.resume
 
 
@@ -987,7 +989,7 @@ def do_train():
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
     # base_enc_lr = 1e-5
-    # base_dec_lr = 4e-5
+    # base_dec_lr = 2e-5
     base_enc_lr = 5e-5
     base_dec_lr = 2e-4
 
@@ -1059,22 +1061,32 @@ def do_train():
         print("Loading optimizer state from checkpoint.")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
+    effective_steps_per_epoch = (
+        int(STEPS_PER_EPOCH_TRAIN / 2) if USE_ACCUMULATION else STEPS_PER_EPOCH_TRAIN
+    )
+
     # 1 epoch warm-up to the base LR
     warmup = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=0.3, end_factor=1.0, total_iters=STEPS_PER_EPOCH_TRAIN
+        optimizer,
+        start_factor=0.3,
+        end_factor=1.0,
+        total_iters=effective_steps_per_epoch,
     )
 
     cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=(EPOCHS - 1) * STEPS_PER_EPOCH_TRAIN,
+        T_max=(EPOCHS - 1) * effective_steps_per_epoch,
         # eta_min=base_enc_lr * 0.05,
-        eta_min=base_dec_lr * 0.05,
+        # eta_min=base_dec_lr * 0.05,
+        eta_min=base_dec_lr * 0.1,
     )
 
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer,
         schedulers=[warmup, cosine],
-        milestones=[STEPS_PER_EPOCH_TRAIN],  # After first epoch switch to cosine
+        milestones=[
+            effective_steps_per_epoch,
+        ],  # After first epoch switch to cosine
     )
 
     if checkpoint is not None and resume_training:
@@ -1120,7 +1132,7 @@ def do_train():
                 "batch_count": 0,
             },
         }
-        # accum_steps = 2
+        accum_steps = 2
 
         bar = tqdm(
             range(STEPS_PER_EPOCH_TRAIN),
@@ -1128,7 +1140,9 @@ def do_train():
             unit="batch",
         )
 
-        # optimizer.zero_grad(set_to_none=True)
+        if USE_ACCUMULATION:
+            optimizer.zero_grad(set_to_none=True)
+
         for i in bar:
             skyrim_batch = next(skyrim_train_iter)
 
@@ -1148,7 +1162,9 @@ def do_train():
 
             gt = gt.to(device, non_blocking=True)
 
-            optimizer.zero_grad()
+            if not USE_ACCUMULATION:
+                optimizer.zero_grad()
+
             with torch.no_grad():
                 with autocast(device_type=device.type):
                     #  Get Segoformer ouput for FiLM
@@ -1207,19 +1223,26 @@ def do_train():
 
             epoch_data["train"]["batch_count"] += 1
 
-            # loss = loss / accum_steps  # Scale loss for accumulation
+            if USE_ACCUMULATION:
+                loss = loss / accum_steps  # Scale loss for accumulation
+
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(unet_maps.parameters(), 1.0)
+            # scaler.unscale_(optimizer)
+            # torch.nn.utils.clip_grad_norm_(unet_maps.parameters(), 1.0)
 
-            scaler.step(optimizer)
-            scaler.update()
+            if not USE_ACCUMULATION:
+                scaler.step(optimizer)
+                scaler.update()
 
-            # if (i + 1) % accum_steps == 0 or (i + 1) == STEPS_PER_EPOCH_TRAIN:
-            #     scaler.step(optimizer)
-            #     scaler.update()
-            #     optimizer.zero_grad(set_to_none=True)
-            scheduler.step()
+                scheduler.step()
+
+            if USE_ACCUMULATION:
+                if (i + 1) % accum_steps == 0 or (i + 1) == STEPS_PER_EPOCH_TRAIN:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
+                    # Step per effective batch
+                    scheduler.step()
 
         calculate_avg(epoch_data, key="train")
 
