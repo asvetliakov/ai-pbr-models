@@ -86,7 +86,7 @@ UNET_MAP = args.map_to_train
 print(f"Training phase: {args.phase}, map to train: {UNET_MAP}")
 
 # HYPER_PARAMETERS
-EPOCHS = 7  # Number of epochs to train
+EPOCHS = 14  # Number of epochs to train
 # LR = 1e-3  # Learning rate for the optimizer
 WD = 1e-2  # Weight decay for the optimizer
 # T_MAX = 10  # Max number of epochs for the learning rate scheduler
@@ -132,10 +132,10 @@ skyrim_validation_dataset.all_validation_samples = (
     skyrim_train_dataset.all_validation_samples
 )
 
-CROP_SIZE = 768
+CROP_SIZE = 1024
 
-BATCH_SIZE = 6
-BATCH_SIZE_VALIDATION = 6
+BATCH_SIZE = 3
+BATCH_SIZE_VALIDATION = 3
 
 SKYRIM_PHOTOMETRIC = 0.0
 
@@ -158,12 +158,13 @@ resume_training = args.resume
 
 
 def get_model():
+    num_classes = len(matsynth_train_dataset.CLASS_LIST)
     # AO, height
     unet_channels = 5
     if UNET_MAP == "roughness":
         unet_channels = 6
     elif UNET_MAP == "metallic":
-        unet_channels = 3
+        unet_channels = 3 + num_classes  # RGB + Segformer mask
 
     unet = UNetSingleChannel(in_ch=unet_channels, cond_ch=512).to(device)  # type: ignore
 
@@ -173,15 +174,25 @@ def get_model():
         weight_donor_checkpoint = torch.load(weight_donor_path, map_location=device)
 
         if UNET_MAP == "metallic":
-            w_old = weight_donor_checkpoint["unet_albedo_model_state_dict"][
-                "unet.inc.conv.0.weight"
-            ]  # torch.Size([64, 6, 3, 3])
-            # Take RGB channels from A2 weights
-            w_new = w_old[:, :3, :, :].clone()  # torch.Size([64, 3, 3, 3])
+            with torch.no_grad():
 
-            weight_donor_checkpoint["unet_albedo_model_state_dict"][
-                "unet.inc.conv.0.weight"
-            ] = w_new
+                w_old = weight_donor_checkpoint["unet_albedo_model_state_dict"][
+                    "unet.inc.conv.0.weight"
+                ]  # torch.Size([64, 6, 3, 3])
+
+                w_rgb = w_old[:, :3, :, :].clone()  # torch.Size([64, 3, 3, 3])
+                w_mask = torch.empty(
+                    (w_old.size(0), num_classes, *w_old.shape[2:]),
+                    device=w_old.device,
+                    dtype=w_old.dtype,
+                )
+                torch.nn.init.kaiming_normal_(w_mask, mode="fan_out")
+
+                w_new = torch.cat((w_rgb, w_mask), dim=1)
+
+                weight_donor_checkpoint["unet_albedo_model_state_dict"][
+                    "unet.inc.conv.0.weight"
+                ] = w_new
 
         unet.load_state_dict(
             weight_donor_checkpoint["unet_albedo_model_state_dict"], strict=False
@@ -999,10 +1010,10 @@ def do_train():
 
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
-    # base_enc_lr = 1e-5
-    # base_dec_lr = 2e-5
-    base_enc_lr = 5e-5
-    base_dec_lr = 2e-4
+    base_enc_lr = 2e-5
+    base_dec_lr = 5e-5
+    # base_enc_lr = 5e-5
+    # base_dec_lr = 2e-4
 
     # ❶ encoder with LLRD
     depth_map = {
@@ -1088,8 +1099,8 @@ def do_train():
         optimizer,
         T_max=(EPOCHS - 1) * effective_steps_per_epoch,
         # eta_min=base_enc_lr * 0.05,
-        # eta_min=base_dec_lr * 0.05,
-        eta_min=base_dec_lr * 0.1,
+        eta_min=base_dec_lr * 0.05,
+        # eta_min=base_dec_lr * 0.1,
     )
 
     scheduler = torch.optim.lr_scheduler.SequentialLR(
@@ -1110,7 +1121,7 @@ def do_train():
         scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
     # for pg in optimizer.param_groups:
-    #     pg["lr"] = pg["lr"] * 0.1
+    #     pg["lr"] = pg["lr"] * 0.5
     #     print(
     #         f"Param group: {pg['params'][0].name}, LR: {pg['lr']:.1e}, WD: {pg['weight_decay']}"
     #     )
@@ -1186,6 +1197,18 @@ def do_train():
                         .hidden_states[-1]
                         .detach()
                     )
+                    # Get segformer mask
+                    segformer_pred = segformer(
+                        albedo_and_normal_segformer
+                    ).logits.detach()
+
+                    segformer_pred: torch.Tensor = torch.nn.functional.interpolate(
+                        segformer_pred,
+                        size=albedo_and_normal_segformer.shape[2:],
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+
                     predicted_albedo = unet_albedo(
                         diffuse_and_normal, seg_feats
                     ).detach()
@@ -1216,8 +1239,19 @@ def do_train():
                 )
 
             if UNET_MAP == "metallic":
-                # For metallic, we use the albedo and normal as input
-                input = predicted_albedo
+                seg_mask = F.one_hot(
+                    segformer_pred.argmax(1),
+                    num_classes=len(matsynth_train_dataset.CLASS_LIST),
+                )  # (B,H,W,K)
+                seg_mask = seg_mask.permute(0, 3, 1, 2).float()  # → (B,K,H,W)
+
+                input = torch.cat(
+                    [
+                        predicted_albedo,
+                        seg_mask,
+                    ],
+                    dim=1,
+                )
 
             with autocast(device_type=device.type):
                 # Get predicted map from UNet
@@ -1308,6 +1342,19 @@ def do_train():
                         .hidden_states[-1]
                         .detach()
                     )
+
+                    # Get segformer mask
+                    segformer_pred = segformer(
+                        albedo_and_normal_segformer
+                    ).logits.detach()
+
+                    segformer_pred: torch.Tensor = torch.nn.functional.interpolate(
+                        segformer_pred,
+                        size=albedo_and_normal_segformer.shape[2:],
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+
                     predicted_albedo = unet_albedo(
                         diffuse_and_normal, seg_feats
                     ).detach()
@@ -1340,8 +1387,19 @@ def do_train():
                     )
 
                 if UNET_MAP == "metallic":
-                    # For metallic, we use the albedo and normal as input
-                    input = predicted_albedo
+                    seg_mask = F.one_hot(
+                        segformer_pred.argmax(1),
+                        num_classes=len(matsynth_train_dataset.CLASS_LIST),
+                    )  # (B,H,W,K)
+                    seg_mask = seg_mask.permute(0, 3, 1, 2).float()  # → (B,K,H,W)
+
+                    input = torch.cat(
+                        [
+                            predicted_albedo,
+                            seg_mask,
+                        ],
+                        dim=1,
+                    )
 
                 with autocast(device_type=device.type):
                     # Get predicted map from UNet
