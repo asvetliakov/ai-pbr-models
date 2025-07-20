@@ -1,11 +1,14 @@
 import seed
 import os
+import json
+import numpy as np
 from PIL import Image
 from pathlib import Path
 import torch
 import random
 from torch.utils.data import Dataset
 from typing import Callable, Optional
+from class_materials import CLASS_PALETTE
 
 
 class SkyrimDataset(Dataset):
@@ -13,45 +16,55 @@ class SkyrimDataset(Dataset):
     def __init__(
         self,
         skyrim_dir: str,
+        data_File: str,
         split: str = "train",
-        load_non_pbr=False,
-        skip_init=False,
-        ignore_without_parallax=False,
-        matsynth_metallic_dir: Optional[str] = None,
+        # skip_init=False,
     ):
         self.skyrim_input_dir = os.path.join(skyrim_dir)
         self.transform: Optional[Callable] = None
         self.split = split
 
+        train_data = json.load(open(data_File, "r"))
+        # self.train_dataset = data["train"]
+        # self.val_dataset = data["val"]
+
         self.all_train_samples = []
         self.all_validation_samples = []
 
-        if skip_init:
-            return
+        # if skip_init:
+        #     return
 
-        all_samples = []
-
-        glob = "**/*_diffuse.png" if load_non_pbr else "**/*_basecolor.png"
+        glob = "**/*_mask.png"
 
         for sample in Path(self.skyrim_input_dir).glob(glob):
+            relative_path = sample.relative_to(self.skyrim_input_dir)
+
+            if not train_data["train"].include(relative_path) and not train_data[
+                "val"
+            ].include(relative_path):
+                print(f"Skipping sample {sample} not in train or val set")
+                continue
+
+            dataset = (
+                self.all_train_samples
+                if train_data["train"].include(relative_path)
+                else self.all_validation_samples
+            )
+
             # Use relative path for sample name
-            rel_path = (
+            rel_base_name = (
                 str(sample.parent.relative_to(self.skyrim_input_dir))
                 .replace("\\", "_")
                 .replace("/", "_")
                 .replace(" ", "_")
             )
-            base_name = (
-                sample.stem.replace("_diffuse", "")
-                if load_non_pbr
-                else sample.stem.replace("_basecolor", "")
-            )
-            name = rel_path + "_" + base_name
+            base_name = sample.stem.replace("_mask", "")
+            name = rel_base_name + "_" + base_name
             path = sample.absolute()
-            parallax_path = path.with_name(base_name + "_parallax.png")
 
-            if ignore_without_parallax and not parallax_path.exists():
-                continue
+            # parallax_path = path.with_name(base_name + "_parallax.png")
+            # if ignore_without_parallax and not parallax_path.exists():
+            #     continue
 
             sample = {
                 "source": "skyrim",
@@ -65,32 +78,9 @@ class SkyrimDataset(Dataset):
                 "metallic": str(path.with_name(base_name + "_metallic.png")),
                 "roughness": str(path.with_name(base_name + "_roughness.png")),
                 "poisson_blur": str(path.with_name(base_name + "_poisson_blur.png")),
+                "mask": path.with_name(base_name + "_mask.png"),
             }
-            all_samples.append(sample)
-
-        if matsynth_metallic_dir:
-            metallic_path = Path(matsynth_metallic_dir)
-            for metadata in metallic_path.glob("**/*.json"):
-                name = metadata.stem
-                path = metadata.absolute()
-                sample = {
-                    "source": "matsynth",
-                    "name": name,
-                    "pbr": True,
-                    "diffuse": str(path.with_name(name + "_diffuse.png")),
-                    "basecolor": str(path.with_name(name + "_basecolor.png")),
-                    "normal": str(path.with_name(name + "_normal.png")),
-                    "ao": str(path.with_name(name + "_ao.png")),
-                    "parallax": str(path.with_name(name + "_parallax.png")),
-                    "metallic": str(path.with_name(name + "_metallic.png")),
-                    "roughness": str(path.with_name(name + "_roughness.png")),
-                }
-            all_samples.append(sample)
-
-        n_val = max(1, int(0.1 * len(all_samples)))
-        random.shuffle(all_samples)
-        self.all_validation_samples = all_samples[:n_val]
-        self.all_train_samples = all_samples[n_val:]
+            dataset.append(sample)
 
     def set_transform(self, transform: Callable) -> None:
         self.transform = transform
@@ -102,12 +92,39 @@ class SkyrimDataset(Dataset):
             or len(self.all_validation_samples)
         )
 
+    def get_specific_sample(self, name: str) -> dict[str, torch.Tensor]:
+        samples = (
+            self.split == "train"
+            and self.all_train_samples
+            or self.all_validation_samples
+        )
+
+        for sample in samples:
+            if sample["name"] == name:
+                return self._process_sample(sample, call_tansform=False)
+
+        raise ValueError(f"Sample with name {name} not found")
+
     def _process_sample(self, sample, call_tansform: bool) -> dict[str, torch.Tensor]:
         # Clone sample to avoid modifying the original
         sample = sample.copy()
         sample["diffuse"] = Image.open(sample["diffuse"]).convert("RGB")
 
         sample["normal"] = Image.open(sample["normal"]).convert("RGB")
+
+        mask = Image.open(sample["mask"]).convert("RGB")
+        # Convert mask RGB colors to class indices
+        mask_np = np.array(mask)
+
+        # Create H×W array with class indices, default to 255 for unknown colors
+        class_mask = np.full(mask_np.shape[:2], 255, dtype=np.uint8)
+
+        # For each class, find matching pixels and set their index
+        for class_idx, color in CLASS_PALETTE.items():
+            color_match = np.all(mask_np == color, axis=-1)
+            class_mask[color_match] = class_idx
+
+        sample["mask"] = torch.from_numpy(class_mask)
 
         if Path(sample["basecolor"]).exists():
             sample["basecolor"] = Image.open(sample["basecolor"]).convert("RGB")

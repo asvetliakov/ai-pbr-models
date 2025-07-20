@@ -4,7 +4,7 @@ import random
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFilter
-from typing import Optional
+from typing import Optional, TypedDict
 from noise import pnoise2
 from torchvision import transforms as T
 from torchvision.transforms import functional as TF
@@ -30,10 +30,24 @@ def center_crop(
     return crop  # type: ignore
 
 
+class CropResult(TypedDict):
+    albedo: Image.Image
+    normal: Image.Image
+    mask: Optional[torch.Tensor]
+    diffuse: Optional[Image.Image]
+    height: Optional[Image.Image]
+    metallic: Optional[Image.Image]
+    roughness: Optional[Image.Image]
+    ao: Optional[Image.Image]
+    poisson_blur: Optional[Image.Image]
+
+
 def get_random_crop(
+    *,
     albedo: Image.Image,
     normal: Image.Image,
     size: tuple[int, int],
+    mask: Optional[torch.Tensor] = None,
     diffuse: Optional[Image.Image] = None,
     height: Optional[Image.Image] = None,
     metallic: Optional[Image.Image] = None,
@@ -43,24 +57,21 @@ def get_random_crop(
     resize_to: Optional[list[int]] = None,
     augmentations: Optional[bool] = True,
     center_crop: Optional[bool] = False,
-) -> tuple[
-    Image.Image,
-    Image.Image,
-    Optional[Image.Image],
-    Optional[Image.Image],
-    Optional[Image.Image],
-    Optional[Image.Image],
-    Optional[Image.Image],
-    Optional[Image.Image],
-]:
+    specific_crop_pos: Optional[tuple[int, int]] = None,
+) -> CropResult:
     """
     Crop and resize two images to the same size.
     """
     if not center_crop:
-        i, j, h, w = T.RandomCrop.get_params(albedo, output_size=size)  # type: ignore
+        if not specific_crop_pos
+            i, j, h, w = T.RandomCrop.get_params(albedo, output_size=size)  # type: ignore
+        else:
+            i, j = specific_crop_pos
+            h, w = size
 
         final_albedo = TF.crop(albedo, i, j, h, w)  # type: ignore
         final_normal = TF.crop(normal, i, j, h, w)  # type: ignore
+        final_mask = TF.crop(mask, i, j, h, w) if mask is not None else None  # type: ignore
         final_diffuse = (
             TF.crop(diffuse, i, j, h, w) if diffuse is not None else None  # type: ignore
         )
@@ -80,6 +91,9 @@ def get_random_crop(
     else:
         final_albedo = TF.center_crop(albedo, size)  # type: ignore
         final_normal = TF.center_crop(normal, size)  # type: ignore
+        final_mask = (
+            TF.center_crop(mask, size) if mask is not None else None  # type: ignore
+        )
         final_diffuse = (
             TF.center_crop(diffuse, size) if diffuse is not None else None  # type: ignore
         )
@@ -101,6 +115,9 @@ def get_random_crop(
         if random.random() < 0.5:
             final_albedo = TF.hflip(final_albedo)
             final_normal = TF.hflip(final_normal)
+            final_mask = (
+                TF.hflip(final_mask) if final_mask is not None else None  # type: ignore
+            )
             final_diffuse = (
                 TF.hflip(final_diffuse) if final_diffuse is not None else None
             )
@@ -119,6 +136,9 @@ def get_random_crop(
         if random.random() < 0.5:
             final_albedo = TF.vflip(final_albedo)
             final_normal = TF.vflip(final_normal)
+            final_mask = (
+                TF.vflip(final_mask) if final_mask is not None else None  # type: ignore
+            )
             final_diffuse = (
                 TF.vflip(final_diffuse) if final_diffuse is not None else None
             )
@@ -140,6 +160,9 @@ def get_random_crop(
             k = random.randint(0, 3)
             final_albedo = TF.rotate(final_albedo, angle=k * 90)
             final_normal = TF.rotate(final_normal, angle=k * 90)
+            final_mask = (
+                TF.rotate(final_mask, angle=k * 90) if final_mask is not None else None
+            )
             final_diffuse = (
                 TF.rotate(final_diffuse, angle=k * 90)
                 if final_diffuse is not None
@@ -177,6 +200,11 @@ def get_random_crop(
             final_normal, resize_to, interpolation=TF.InterpolationMode.BILINEAR
         )
         final_normal = normalize_normal_map(final_normal)  # type: ignore
+        final_mask = (
+            TF.resize(final_mask, resize_to, interpolation=TF.InterpolationMode.NEAREST)
+            if final_mask is not None
+            else None
+        )
         final_diffuse = (
             TF.resize(
                 final_diffuse, resize_to, interpolation=TF.InterpolationMode.LANCZOS
@@ -220,8 +248,17 @@ def get_random_crop(
             else None
         )
 
-    # image not tensors
-    return final_albedo, final_normal, final_diffuse, final_height, final_metallic, final_roughness, final_ao, final_poisson_blur  # type: ignore
+    return {
+        "albedo": final_albedo,
+        "normal": final_normal,
+        "mask": final_mask,
+        "diffuse": final_diffuse,
+        "height": final_height,
+        "metallic": final_metallic,
+        "roughness": final_roughness,
+        "ao": final_ao,
+        "poisson_blur": final_poisson_blur,
+    }  # type: ignore
 
 
 def make_grain_noise(mask_size: tuple[int, int], strength: float = 0.05) -> Image.Image:

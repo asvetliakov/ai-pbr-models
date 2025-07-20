@@ -8,6 +8,7 @@ import random
 import numpy as np
 from torch.utils.data import Dataset
 from typing import Callable, Optional, Tuple
+from class_materials import CLASS_LIST, CLASS_LIST_IDX_MAPPING
 
 
 def normalize_normal_map(normal: Image.Image) -> Image.Image:
@@ -56,42 +57,17 @@ class SimpleImageDataset(Dataset):
         self.transform: Optional[Callable] = None
         self.split = split
 
-        # Sort train names by categories, need later for weighted sampler
-        self.CLASS_LIST = [
-            "ceramic",
-            "fabric",
-            "ground",
-            "leather",
-            "metal",
-            "stone",
-            "wood",
-        ]
-        # For mask visualization
-        self.CLASS_PALETTE = {
-            0: (255, 198, 138),  # ceramic, Pale Orange
-            1: (216, 27, 96),  # fabric, Raspberry
-            2: (139, 195, 74),  # ground, Olive Green
-            3: (141, 110, 99),  # leather, Saddle Brown
-            4: (0, 145, 233),  # metal, Blue
-            5: (120, 144, 156),  # stone, Slate Gray
-            6: (229, 115, 115),  # wood, Burnt Sienna
-        }
-        self.CLASS_LIST_IDX_MAPPING = {
-            name: idx for idx, name in enumerate(self.CLASS_LIST)
-        }
-        self.METAL_IDX = self.CLASS_LIST_IDX_MAPPING["metal"]
-
         self.all_train_samples = []
         self.all_validation_samples = []
 
         if skip_init:
             return
 
-        sample_names_per_category = {name: [] for name in self.CLASS_LIST}
+        sample_names_per_category = {name: [] for name in CLASS_LIST}
         for metdata in Path(self.matsynth_input_dir).glob("**/*.json"):
             category_name = metdata.parent.name
             name = metdata.stem
-            category_idx = self.CLASS_LIST_IDX_MAPPING.get(category_name, None)
+            category_idx = CLASS_LIST_IDX_MAPPING.get(category_name, None)
             if category_idx is None:
                 print(f"Warning: Category '{category_name}' not in CLASS_LIST.")
 
@@ -111,7 +87,7 @@ class SimpleImageDataset(Dataset):
                         "source": "matsynth",
                         "name": name,
                         "category_name": category,
-                        "category": self.CLASS_LIST_IDX_MAPPING[category],
+                        "category": CLASS_LIST_IDX_MAPPING[category],
                         "metadata": f"{category}/{name}.json",
                         "ao": f"{category}/{name}_ao.png",
                         "basecolor": f"{category}/{name}_basecolor.png",
@@ -150,7 +126,7 @@ class SimpleImageDataset(Dataset):
         """
         samples = self.all_train_samples
 
-        num_classes = len(self.CLASS_LIST)
+        num_classes = len(CLASS_LIST)
         all_labels = [sample["category"] for sample in samples]
         cls_counts = torch.bincount(torch.tensor(all_labels), minlength=num_classes)
         freq = cls_counts / cls_counts.sum()
