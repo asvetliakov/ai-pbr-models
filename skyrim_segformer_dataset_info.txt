@@ -1,0 +1,28 @@
+Pixels per class (All):
+ceramic: 144334882 pixels (2.0541%)
+fabric: 733744755 pixels (10.4422%)
+ground: 661862150 pixels (9.4192%)
+leather: 520160536 pixels (7.4026%)
+metal: 1244041442 pixels (17.7044%)
+stone: 2546824293 pixels (36.2448%)
+wood: 1175756876 pixels (16.7326%)
+
+Samples per class with >1% ratio:
+ceramic: 133 samples
+fabric: 582 samples
+ground: 276 samples
+leather: 617 samples
+metal: 1041 samples
+stone: 1133 samples
+wood: 662 samples
+
+Validation set size: 319
+Training set size: 2877
+
+Class weights for training dataset:
+{'ceramic': 2.110427016563956, 'fabric': 0.9084989760508438, 'ground': 0.9883458124089929, 'leather': 1.0895438981748855, 'metal': 0.6995011622473395, 'stone': 0.4881979607448465, 'wood': 0.7154851738091358}
+2877.000148534775
+Min/Max weight: 0.7560208439826965 2.5200703144073486
+Oversample factor for heaviest image: 3.3333344370926192
+
+Ceramic heterogeneous ( 1/1.5/3% <= freq < 30% ) crops found: 256x256: 1209, 512x512: 484, 768x768: 454

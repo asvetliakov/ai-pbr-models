@@ -11,12 +11,27 @@ from typing import Callable, Optional
 from class_materials import CLASS_PALETTE
 
 
+def mask_to_tensor(mask: Image.Image) -> torch.Tensor:
+    """
+    Convert a PIL mask image to a tensor of class indices.
+    """
+    mask_np = np.array(mask)
+    # Create H×W array with class indices, default to 255 for unknown colors
+    class_mask = np.full(mask_np.shape[:2], 255, dtype=np.uint8)
+
+    for class_idx, color in CLASS_PALETTE.items():
+        color_match = np.all(mask_np == color, axis=-1)
+        class_mask[color_match] = class_idx
+
+    return torch.from_numpy(class_mask)
+
+
 class SkyrimDataset(Dataset):
 
     def __init__(
         self,
         skyrim_dir: str,
-        data_File: str,
+        data_file: str,
         split: str = "train",
         # skip_init=False,
     ):
@@ -24,7 +39,7 @@ class SkyrimDataset(Dataset):
         self.transform: Optional[Callable] = None
         self.split = split
 
-        train_data = json.load(open(data_File, "r"))
+        train_data = json.load(open(data_file, "r"))
         # self.train_dataset = data["train"]
         # self.val_dataset = data["val"]
 
@@ -37,17 +52,18 @@ class SkyrimDataset(Dataset):
         glob = "**/*_mask.png"
 
         for sample in Path(self.skyrim_input_dir).glob(glob):
-            relative_path = sample.relative_to(self.skyrim_input_dir)
+            relative_path = str(sample.relative_to(self.skyrim_input_dir))
 
-            if not train_data["train"].include(relative_path) and not train_data[
-                "val"
-            ].include(relative_path):
-                print(f"Skipping sample {sample} not in train or val set")
+            if (
+                relative_path not in train_data["train"]
+                and relative_path not in train_data["val"]
+            ):
+                print(f"Skipping sample {relative_path} not in train or val set")
                 continue
 
             dataset = (
                 self.all_train_samples
-                if train_data["train"].include(relative_path)
+                if relative_path in train_data["train"]
                 else self.all_validation_samples
             )
 
@@ -69,6 +85,7 @@ class SkyrimDataset(Dataset):
             sample = {
                 "source": "skyrim",
                 "name": name,
+                "mask_relative_path": relative_path,
                 "pbr": path.with_name(base_name + "_basecolor.png").exists(),
                 "diffuse": str(path.with_name(base_name + "_diffuse.png")),
                 "basecolor": str(path.with_name(base_name + "_basecolor.png")),
@@ -92,7 +109,9 @@ class SkyrimDataset(Dataset):
             or len(self.all_validation_samples)
         )
 
-    def get_specific_sample(self, name: str) -> dict[str, torch.Tensor]:
+    def get_specific_sample_for_relative_mask(
+        self, name: str
+    ) -> dict[str, Image.Image]:
         samples = (
             self.split == "train"
             and self.all_train_samples
@@ -100,31 +119,31 @@ class SkyrimDataset(Dataset):
         )
 
         for sample in samples:
-            if sample["name"] == name:
+            if sample["mask_relative_path"] == name:
                 return self._process_sample(sample, call_tansform=False)
 
         raise ValueError(f"Sample with name {name} not found")
 
-    def _process_sample(self, sample, call_tansform: bool) -> dict[str, torch.Tensor]:
+    def _process_sample(self, sample, call_tansform: bool) -> dict[str, Image.Image]:
         # Clone sample to avoid modifying the original
         sample = sample.copy()
         sample["diffuse"] = Image.open(sample["diffuse"]).convert("RGB")
 
         sample["normal"] = Image.open(sample["normal"]).convert("RGB")
 
-        mask = Image.open(sample["mask"]).convert("RGB")
+        sample["mask"] = Image.open(sample["mask"]).convert("RGB")
         # Convert mask RGB colors to class indices
-        mask_np = np.array(mask)
+        # mask_np = np.array(mask)
 
-        # Create H×W array with class indices, default to 255 for unknown colors
-        class_mask = np.full(mask_np.shape[:2], 255, dtype=np.uint8)
+        # # Create H×W array with class indices, default to 255 for unknown colors
+        # class_mask = np.full(mask_np.shape[:2], 255, dtype=np.uint8)
 
-        # For each class, find matching pixels and set their index
-        for class_idx, color in CLASS_PALETTE.items():
-            color_match = np.all(mask_np == color, axis=-1)
-            class_mask[color_match] = class_idx
+        # # For each class, find matching pixels and set their index
+        # for class_idx, color in CLASS_PALETTE.items():
+        #     color_match = np.all(mask_np == color, axis=-1)
+        #     class_mask[color_match] = class_idx
 
-        sample["mask"] = torch.from_numpy(class_mask)
+        # sample["mask"] = torch.from_numpy(class_mask)
 
         if Path(sample["basecolor"]).exists():
             sample["basecolor"] = Image.open(sample["basecolor"]).convert("RGB")
@@ -164,7 +183,7 @@ class SkyrimDataset(Dataset):
 
         return sample
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, Image.Image]:
         samples = (
             self.split == "train"
             and self.all_train_samples

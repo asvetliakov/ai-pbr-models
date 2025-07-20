@@ -21,7 +21,7 @@ from transformers.utils.constants import (
     IMAGENET_STANDARD_STD,
 )
 from train_dataset import SimpleImageDataset
-from skyrim_dataset import SkyrimDataset
+from skyrim_dataset import SkyrimDataset, mask_to_tensor
 from augmentations import (
     get_random_crop,
     make_full_image_mask,
@@ -118,13 +118,13 @@ mat_train_sampler = WeightedRandomSampler(
 skyrim_train_dataset = SkyrimDataset(
     skyrim_dir=str(skyrim_dir),
     split="train",
-    data_File=str(skyrim_data_file_path),
+    data_file=str(skyrim_data_file_path),
 )
 
 skyrim_validation_dataset = SkyrimDataset(
     skyrim_dir=str(skyrim_dir),
     split="validation",
-    data_File=str(skyrim_data_file_path),
+    data_file=str(skyrim_data_file_path),
 )
 
 
@@ -391,11 +391,12 @@ def skyrim_transform_train_fn(example):
         crop_data = skyrim_data_file[f"ceramic_crops_{CROP_SIZE}"]
         (sample_name, x, y) = random.choice(crop_data)
         specific_crop_pos = (x, y)
-        example = skyrim_train_dataset.get_specific_sample(sample_name)
+        example = skyrim_train_dataset.get_specific_sample_for_relative_mask(
+            sample_name
+        )
 
     albedo = example["basecolor"]
     normal = example["normal"]
-    # Tensor already
     mask = example["mask"]
 
     crop_result = get_random_crop(
@@ -430,6 +431,8 @@ def skyrim_transform_train_fn(example):
 
     # Concatenate albedo and normal along the channel dimension
     final_sample = torch.cat((final_albedo, final_normal), dim=0)  # type: ignore
+
+    final_mask = mask_to_tensor(final_mask) if final_mask is not None else None
 
     return {
         "pixel_values": final_sample,
@@ -503,9 +506,11 @@ def skyrim_transform_val_fn(example):
     # Concatenate albedo and normal along the channel dimension
     final = torch.cat((albedo, normal), dim=0)  # type: ignore
 
+    final_mask = mask_to_tensor(mask) if mask is not None else None
+
     return {
         "pixel_values": final,
-        "labels": mask,
+        "labels": final_mask,
     }
 
 
@@ -547,45 +552,73 @@ def dropout_mask(
     return mask
 
 
+IGNORE_INDEX = 255
+
+
+def _make_valid_mask(target: torch.Tensor) -> torch.Tensor:
+    """mask == 1 where target ∈ [0, C-1]; 0 where target == 255"""
+    return target != IGNORE_INDEX
+
+
 # Dynamic focal term for minority classes
-def focal_ce(logits, target, keep_mask=None):
-    log_p = torch.nn.functional.log_softmax(logits, dim=1)
+def focal_ce(
+    logits: torch.Tensor, target: torch.Tensor, keep_mask=None
+) -> torch.Tensor:
+    valid = _make_valid_mask(target)  # (B,H,W) bool
+    if keep_mask is not None:
+        valid &= keep_mask  # combine masks
+
+    if not valid.any():
+        return logits.new_tensor(0.0, requires_grad=True)  # nothing to learn
+
+    # restrict tensors to valid pixels only  → 1-D views (flat)
+    logits_flat = logits.permute(0, 2, 3, 1)[valid]  # (P,C)
+    target_flat = target[valid]  # (P,)
+
+    log_p = torch.nn.functional.log_softmax(logits_flat, dim=1)
     p = torch.exp(log_p)
 
-    one_hot = (
-        torch.nn.functional.one_hot(target, num_classes=logits.size(1))
-        .permute(0, 3, 1, 2)
-        .float()
-    )
+    one_hot = torch.nn.functional.one_hot(
+        target_flat, num_classes=logits.size(1)
+    ).float()
 
-    gamma = PER_CLASS_GAMMA_MAP.view(1, -1, 1, 1).to(logits.device)
+    gamma = PER_CLASS_GAMMA_MAP.to(logits.device, logits.dtype)
     focal = (1 - p).pow(gamma) * log_p
     focal_loss = -(one_hot * focal).float().sum(1)
 
-    if keep_mask is not None:
-        focal_loss = (focal_loss * keep_mask).sum() / keep_mask.sum().clamp(min=1)
-    else:
-        focal_loss = focal_loss.mean()
-
-    return focal_loss
+    return focal_loss.mean()
 
 
 def dice_loss(pred_probs, target, keep_mask=None):
-    gt = (
-        torch.nn.functional.one_hot(target, num_classes=pred_probs.size(1))
+    valid = _make_valid_mask(target)
+    if keep_mask is not None:
+        valid &= keep_mask
+
+    if not valid.any():
+        return pred_probs.new_tensor(0.0, requires_grad=True)
+
+    # Build 4D mask for broadcasting
+    valid4 = valid[:, None, :, :].float()  # (B,1,H,W)
+
+    # Zero out invalid / dropped pixels
+    pred_m = pred_probs * valid4  # (B,C,H,W)
+    # One-hot for valid pixels only
+    gt_onehot = (
+        torch.nn.functional.one_hot(
+            torch.where(valid, target, 0), num_classes=pred_probs.size(1)
+        )
         .permute(0, 3, 1, 2)
         .float()
-    )
-    if keep_mask is not None:
-        keep_mask_4d = keep_mask[:, None, :, :].float()  # (B, 1, H, W)
-        pred_probs = pred_probs * keep_mask_4d
-        gt = gt * keep_mask_4d
+        * valid4
+    )  # (B,C,H,W), zeros elsewhere
 
-    # Global dice loss - sum over spatial dimensions (H,W)
-    intersection = (pred_probs * gt).sum(dim=(2, 3))  # (B, C)
-    union = pred_probs.sum(dim=(2, 3)) + gt.sum(dim=(2, 3))  # (B, C)
-    dice_per_class = 1 - ((2 * intersection + 1e-6) / (union + 1e-6))  # (B, C)
-    # Average across classes to get scalar per sample, then mean across batch
+    # Sum across spatial dims ONLY -> per-class stats
+    intersection = (pred_m * gt_onehot).sum(dim=(2, 3))  # (B,C)
+    union = pred_m.sum(dim=(2, 3)) + gt_onehot.sum(dim=(2, 3))  # (B,C)
+
+    dice_per_class = 1 - (2 * intersection + 1e-6) / (union + 1e-6)  # (B,C)
+
+    # Average across classes & batch → scalar
     return dice_per_class.mean()
 
 
@@ -617,9 +650,9 @@ def calculate_loss(
         keep_mask = dropout_mask(
             labels,
         )
-        loss = (loss * keep_mask).sum() / keep_mask.sum().clamp(min=1)
+        loss = loss * keep_mask  # Apply keep_mask to the loss
 
-    # Calculate per class loss
+    # Calculate per class loss before applying keep_mask reduction
     pixel_loss = loss.view(-1)
     flat_labels = labels.view(-1)
 
@@ -662,8 +695,12 @@ def calculate_loss(
                 )
                 epoch_data[key][dataset]["jaccard_batch_count"][class_id] += 1
 
-    # Calculate mean loss
-    total_loss = loss.mean()
+    # Apply keep_mask reduction after per-class calculations
+    if keep_mask is not None:
+        total_loss = loss.sum() / keep_mask.sum().clamp(min=1)
+    else:
+        # Calculate mean loss
+        total_loss = loss.mean()
 
     if dataset == "skyrim":
         if epoch_data[key][dataset].get("focal_loss") is None:

@@ -33,7 +33,7 @@ def center_crop(
 class CropResult(TypedDict):
     albedo: Image.Image
     normal: Image.Image
-    mask: Optional[torch.Tensor]
+    mask: Optional[Image.Image]
     diffuse: Optional[Image.Image]
     height: Optional[Image.Image]
     metallic: Optional[Image.Image]
@@ -47,7 +47,7 @@ def get_random_crop(
     albedo: Image.Image,
     normal: Image.Image,
     size: tuple[int, int],
-    mask: Optional[torch.Tensor] = None,
+    mask: Optional[Image.Image] = None,
     diffuse: Optional[Image.Image] = None,
     height: Optional[Image.Image] = None,
     metallic: Optional[Image.Image] = None,
@@ -63,7 +63,7 @@ def get_random_crop(
     Crop and resize two images to the same size.
     """
     if not center_crop:
-        if not specific_crop_pos
+        if not specific_crop_pos:
             i, j, h, w = T.RandomCrop.get_params(albedo, output_size=size)  # type: ignore
         else:
             i, j = specific_crop_pos
