@@ -152,8 +152,8 @@ with autocast(device_type=device.type):
 
 CROP_SIZE = 256
 
-BATCH_SIZE_VALIDATION_MATSYNTH = 2
-BATCH_SIZE_VALIDATION_SKYRIM = 2
+BATCH_SIZE_VALIDATION_MATSYNTH = 1
+BATCH_SIZE_VALIDATION_SKYRIM = 1
 
 MATSYNTH_COMPOSITES = False
 MATSYNTH_COLOR_AUGMENTATIONS = True
@@ -170,18 +170,18 @@ BATCH_SIZE_SKYRIM = 0
 
 if CROP_SIZE == 256:
     # S0 phase: 60% Skyrim / 40% MatSynth ratio
-    BATCH_SIZE_SKYRIM = 32
-    BATCH_SIZE_MATSYNTH = 22
-    SKYRIM_WORKERS = 12
-    MATSYNTH_WORKERS = 4
+    BATCH_SIZE_SKYRIM = 24
+    BATCH_SIZE_MATSYNTH = 16
+    SKYRIM_WORKERS = 10
+    MATSYNTH_WORKERS = 6
 
     SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.3
 
 if CROP_SIZE == 512:
-    BATCH_SIZE_SKYRIM = 24
-    BATCH_SIZE_MATSYNTH = 8
-    SKYRIM_WORKERS = 12
-    MATSYNTH_WORKERS = 4
+    BATCH_SIZE_SKYRIM = 20
+    BATCH_SIZE_MATSYNTH = 5
+    SKYRIM_WORKERS = 10
+    MATSYNTH_WORKERS = 6
 
     SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.2
 
@@ -432,7 +432,7 @@ def skyrim_transform_train_fn(example):
     # Concatenate albedo and normal along the channel dimension
     final_sample = torch.cat((final_albedo, final_normal), dim=0)  # type: ignore
 
-    final_mask = mask_to_tensor(final_mask) if final_mask is not None else None
+    final_mask = mask_to_tensor(final_mask)  # type: ignore
 
     return {
         "pixel_values": final_sample,
@@ -506,7 +506,7 @@ def skyrim_transform_val_fn(example):
     # Concatenate albedo and normal along the channel dimension
     final = torch.cat((albedo, normal), dim=0)  # type: ignore
 
-    final_mask = mask_to_tensor(mask) if mask is not None else None
+    final_mask = mask_to_tensor(mask)
 
     return {
         "pixel_values": final,
@@ -646,7 +646,7 @@ def calculate_loss(
     )
 
     keep_mask = None
-    if dataset == "skyrim" and PHASE in {"s0", "s1"}:
+    if dataset == "skyrim" and PHASE in {"s0", "s1"} and key != "validation":
         keep_mask = dropout_mask(
             labels,
         )
@@ -860,7 +860,7 @@ def do_train():
     matsynth_validation_loader = DataLoader(
         matsynth_validation_dataset,  # type: ignore
         batch_size=BATCH_SIZE_VALIDATION_MATSYNTH,
-        num_workers=4,
+        num_workers=2,
         shuffle=False,
         pin_memory=True,
         persistent_workers=True,
@@ -881,7 +881,7 @@ def do_train():
         skyrim_validation_dataset,
         batch_size=BATCH_SIZE_VALIDATION_SKYRIM,
         shuffle=False,
-        num_workers=4,
+        num_workers=2,
         pin_memory=True,
         persistent_workers=True,
     )

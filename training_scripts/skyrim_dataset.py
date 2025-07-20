@@ -23,7 +23,7 @@ def mask_to_tensor(mask: Image.Image) -> torch.Tensor:
         color_match = np.all(mask_np == color, axis=-1)
         class_mask[color_match] = class_idx
 
-    return torch.from_numpy(class_mask)
+    return torch.from_numpy(class_mask).to(torch.int64)
 
 
 class SkyrimDataset(Dataset):
@@ -74,7 +74,7 @@ class SkyrimDataset(Dataset):
                 .replace("/", "_")
                 .replace(" ", "_")
             )
-            base_name = sample.stem.replace("_mask", "")
+            base_name = sample.name.replace("_mask.png", "")
             name = rel_base_name + "_" + base_name
             path = sample.absolute()
 
