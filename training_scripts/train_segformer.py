@@ -152,8 +152,8 @@ with autocast(device_type=device.type):
 
 CROP_SIZE = 256
 
-BATCH_SIZE_VALIDATION_MATSYNTH = 4
-BATCH_SIZE_VALIDATION_SKYRIM = 4
+BATCH_SIZE_VALIDATION_MATSYNTH = 2
+BATCH_SIZE_VALIDATION_SKYRIM = 2
 
 MATSYNTH_COMPOSITES = False
 MATSYNTH_COLOR_AUGMENTATIONS = True
@@ -469,7 +469,7 @@ def matsynth_transform_val_fn(example):
     final = torch.cat((albedo, normal), dim=0)  # type: ignore
 
     mask = make_full_image_mask(
-        category_id=category, img_size=(albedo.shape[0], albedo.shape[1])
+        category_id=category, img_size=(albedo.shape[1], albedo.shape[2])
     )
 
     return {
