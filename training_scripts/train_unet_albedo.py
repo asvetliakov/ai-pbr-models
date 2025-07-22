@@ -83,10 +83,10 @@ torch.backends.cudnn.benchmark = (
     False  # For some reason it may slows down consequent epochs
 )
 
-VISUAL_SAMPLES_COUNT = 8  # Number of samples to visualize in validation
+VISUAL_SAMPLES_COUNT = 10  # Number of samples to visualize in validation
 
 matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
-skyrim_dir = (BASE_DIR / "../skyrim_processed").resolve()
+skyrim_dir = (BASE_DIR / "../skyrim_processed/pbr").resolve()
 
 skyrim_data_file_path = (BASE_DIR / "../skyrim_data_unet_albedo.json").resolve()
 
@@ -452,13 +452,19 @@ def calculate_unet_albedo_loss(
     ecpoch_data["unet_albedo"][key]["l1_loss"] += l1_loss.item()
 
     # SSIM
-    ssim_val = FM.structural_similarity_index_measure(
+    # ssim_val = FM.structural_similarity_index_measure(
+    #     albedo_pred.clamp(0, 1).float(), albedo_gt.clamp(0, 1).float(), data_range=1.0
+    # )
+    # if isinstance(ssim_val, tuple):
+    #     ssim_val = ssim_val[0]
+    # ssim_val = torch.nan_to_num(ssim_val, nan=1.0).float()
+    # ssim_loss = 1 - ssim_val
+
+    ssim = FM.multiscale_structural_similarity_index_measure(
         albedo_pred.clamp(0, 1).float(), albedo_gt.clamp(0, 1).float(), data_range=1.0
     )
-    if isinstance(ssim_val, tuple):
-        ssim_val = ssim_val[0]
-    ssim_val = torch.nan_to_num(ssim_val, nan=1.0).float()
-    ssim_loss = 1 - ssim_val
+    ssim = torch.nan_to_num(ssim, nan=1.0).float()
+    ssim_loss = 1 - ssim
     ecpoch_data["unet_albedo"][key]["ssim_loss"] += ssim_loss.item()
 
     # LPIPS
@@ -467,7 +473,7 @@ def calculate_unet_albedo_loss(
     ecpoch_data["unet_albedo"][key]["lpips"] += lpips.item()
 
     # Total loss
-    total_loss = l1_loss + 0.1 * ssim_loss + 0.08 * lpips
+    total_loss = l1_loss + 0.15 * ssim_loss + 0.05 * lpips
 
     ecpoch_data["unet_albedo"][key]["total_loss"] += total_loss.item()
 
