@@ -564,7 +564,7 @@ def do_train():
         sampler=skyrim_train_sampler,
         num_workers=SKYRIM_WORKERS,
         prefetch_factor=2,
-        shuffle=True,
+        shuffle=False,
         pin_memory=True,
         persistent_workers=True,
     )
