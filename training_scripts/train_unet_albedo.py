@@ -149,7 +149,7 @@ SKYRIM_PHOTOMETRIC = 0.6
 USE_ACCUMULATION = False
 
 if CROP_SIZE == 256:
-    BATCH_SIZE_SKYRIM = 40
+    BATCH_SIZE_SKYRIM = 24
     BATCH_SIZE_MATSYNTH = 0
     SKYRIM_WORKERS = 16
     MATSYNTH_WORKERS = 0
@@ -732,9 +732,9 @@ def do_train():
             with torch.no_grad():
                 with autocast(device_type=device.type):
                     #  Get Segoformer ouput for FiLM
-                    seg_feats = segformer(
-                        albedo_and_normal_segformer, output_hidden_states=True
-                    )["hidden_states"][-1].detach()
+                    seg_feats = segformer(albedo_and_normal_segformer)["hidden_states"][
+                        -1
+                    ].detach()
 
             with autocast(device_type=device.type):
                 # Get UNet-Albedo prediction
@@ -858,9 +858,9 @@ def do_train():
                 original_normal = original_normal.to(device, non_blocking=True)
 
                 with autocast(device_type=device.type):
-                    seg_feats = segformer(
-                        albedo_and_normal_segformer, output_hidden_states=True
-                    )["hidden_states"][-1].detach()
+                    seg_feats = segformer(albedo_and_normal_segformer)["hidden_states"][
+                        -1
+                    ].detach()
                     albedo_pred = unet_alb(diffuse_and_normal, seg_feats)
 
                 calculate_unet_albedo_loss(

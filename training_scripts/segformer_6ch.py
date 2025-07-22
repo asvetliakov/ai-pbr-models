@@ -90,7 +90,7 @@ def create_segformer(
         logits_full = self.decode_head.upsampler(fused)  # final H × W
         return {
             "logits": logits_full,
-            "hidden_states": hidden_states,
+            "hidden_states": outputs.hidden_states,
         }
 
     model.forward = MethodType(forward_fullres, model)
