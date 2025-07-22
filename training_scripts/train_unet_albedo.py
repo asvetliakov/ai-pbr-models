@@ -133,7 +133,7 @@ skyrim_train_sampler = WeightedRandomSampler(
     replacement=True,
 )
 
-CROP_SIZE = 256
+CROP_SIZE = 512
 
 BATCH_SIZE_VALIDATION_MATSYNTH = 1
 BATCH_SIZE_VALIDATION_SKYRIM = 1
@@ -157,9 +157,9 @@ if CROP_SIZE == 256:
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.3
 
 if CROP_SIZE == 512:
-    BATCH_SIZE_SKYRIM = 12
+    BATCH_SIZE_SKYRIM = 8
     BATCH_SIZE_MATSYNTH = 0
-    SKYRIM_WORKERS = 12
+    SKYRIM_WORKERS = 8
     MATSYNTH_WORKERS = 0
     # SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.2
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.2
@@ -517,7 +517,7 @@ skyrim_validation_dataset.set_transform(transform_val_fn)
 
 # Training loop
 def do_train():
-    EPOCHS = 45
+    EPOCHS = 15
 
     print(
         f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, MatSynth/Skyrim Batch: {BATCH_SIZE_MATSYNTH}/{BATCH_SIZE_SKYRIM}, validation on {len(skyrim_validation_dataset)} Skyrim samples."
@@ -592,18 +592,18 @@ def do_train():
 
     enc_params = {
         "params": unet_alb.unet.encoder.parameters(),
-        "lr": 2e-4,
+        "lr": 8e-6,
         "weight_decay": WD,
     }
     dec_params = {
         "params": unet_alb.unet.decoder.parameters(),
-        "lr": 2e-4,
+        "lr": 3e-5,
         "weight_decay": WD,
     }
-    film_params = {"params": unet_alb.unet.film.parameters(), "lr": 3e-4, "weight_decay": 0.0}  # type: ignore
+    film_params = {"params": unet_alb.unet.film.parameters(), "lr": 4e-5, "weight_decay": 0.0}  # type: ignore
     head_params = {
         "params": unet_alb.out.parameters(),
-        "lr": 2.5e-4,
+        "lr": 3e-5,
         "weight_decay": WD,
     }
 
@@ -627,18 +627,47 @@ def do_train():
         print("Loading optimizer state from checkpoint.")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
+    effective_scheduler_steps = (
+        int(STEPS_PER_EPOCH_TRAIN / 2) if USE_ACCUMULATION else STEPS_PER_EPOCH_TRAIN
+    )
+
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     #     optimizer, T_max=EPOCHS, eta_min=LR * 0.1
     # )
     # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer,
+    #     max_lr=[2e-4, 2e-4, 3e-4, 2.5e-4],
+    #     total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
+    #     pct_start=0.2,
+    #     anneal_strategy="cos",
+    #     final_div_factor=20,  # final LR ≈ max/20 ≈ 1e-5
+    # )
+    # 1 epoch warm-up to the base LR
+    warmup = torch.optim.lr_scheduler.LinearLR(
         optimizer,
-        max_lr=[2e-4, 2e-4, 3e-4, 2.5e-4],
-        total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
-        pct_start=0.2,
-        anneal_strategy="cos",
-        final_div_factor=20,  # final LR ≈ max/20 ≈ 1e-5
+        start_factor=0.1,
+        end_factor=1.0,
+        total_iters=effective_scheduler_steps,
+    )
+
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=5e-6
+    )
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    #     optimizer,
+    #     T_0=3 * effective_scheduler_steps,  # 4 epochs per restart
+    #     T_mult=1,
+    #     eta_min=2e-6,
+    # )
+
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup, cosine],
+        milestones=[
+            effective_scheduler_steps,
+        ],  # After first epoch switch to cosine
     )
 
     if checkpoint is not None and resume_training:
