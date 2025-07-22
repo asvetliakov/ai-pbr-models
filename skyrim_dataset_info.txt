@@ -1,4 +1,4 @@
------------------------ With separate ceramic class ----------------------
+----------------------- Segformer: With separate ceramic class ----------------------
 
 Pixels per class (All):
 ceramic: 144334882 pixels (2.0541%)
@@ -29,7 +29,7 @@ Oversample factor for heaviest image: 3.3333344370926192
 
 Ceramic heterogeneous ( 1/1.5/3% <= freq < 30% ) crops found: 256x256: 1209, 512x512: 484, 768x768: 454
 
------------------------ Ceramic has been merged into stone ----------------------
+----------------------- Segformer: Ceramic has been merged into stone ----------------------
 
 Pixels per class (All):
 fabric: 733528861 pixels (10.4438%)
@@ -56,9 +56,8 @@ Class weights for training dataset:
 Min/Max weight: 0.6590490937232971 2.196830987930298
 Oversample factor for heaviest image: 3.3333343583242088
 
----------------------------------------------------------------------------------
+----------------------- Segformer: Best Model Confusion Matrix (S4 Epoch 4) ----------------------
 
-S4 best model (epoch 4) confusion matrix:
 True\Pred       fabric    ground   leather     metal     stone      wood
 fabric           92.7%      2.5%      3.7%      0.5%      0.5%      0.1%
 ground            0.0%     99.1%      0.0%      0.0%      0.9%      0.0%
@@ -66,3 +65,29 @@ leather           3.8%      0.0%     82.7%      9.2%      2.0%      2.4%
 metal             0.9%      0.0%      1.5%     92.5%      2.9%      2.1%
 stone             0.3%      0.4%      2.3%      3.7%     93.2%      0.0%
 wood              3.4%      0.0%      9.2%      1.9%      0.7%     84.8%
+
+----------------------- Unet-Albedo dataset info ----------------------
+Pixels per class (All):
+fabric: 675271397 pixels (10.7960%)
+ground: 661862150 pixels (10.5816%)
+leather: 351266803 pixels (5.6159%)
+metal: 826093422 pixels (13.2073%)
+stone: 2633144250 pixels (42.0978%)
+wood: 1107183904 pixels (17.7013%)
+
+Samples per class with >40% ratio:
+fabric: 340 samples
+ground: 268 samples
+leather: 250 samples
+metal: 410 samples
+stone: 1119 samples
+wood: 526 samples
+
+Validation set size: 284
+Training set size: 2561
+
+Class weights for training dataset:
+{'fabric': 1.0710162885800543, 'ground': 1.085533051154761, 'leather': 1.488785608698755, 'metal': 0.9749781378385323, 'stone': 0.5429807186223523, 'wood': 0.8367061951055458}
+2561.000130355358
+Min/Max weight: 0.6824207305908203 2.2747364044189453
+Oversample factor for heaviest image: 3.3333342649915454

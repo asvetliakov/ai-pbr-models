@@ -7,9 +7,9 @@ import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_DIR = Path(__file__).resolve().parent
-INPUT_DIR = (BASE_DIR / "../skyrim_processed").resolve()
+INPUT_DIR = (BASE_DIR / "../skyrim_processed/pbr").resolve()
 
-json_path = BASE_DIR / "../skyrim_data_segformer.json"
+json_path = BASE_DIR / "../skyrim_data_unet_albedo.json"
 
 CLASS_LIST = [
     "fabric",
@@ -41,13 +41,20 @@ MINORITY_CLASSES_IDX = [CLASS_LIST.index("fabric"), CLASS_LIST.index("leather")]
 # existing_data = json.load(open(json_path, "r"))
 
 
-def process_mask(path):
+def process_mask(path: Path):
+    class_counts = {name: 0 for name in CLASS_LIST}
+    total = 0
     mask_img = Image.open(path).convert("RGB")
     is_square = mask_img.width == mask_img.height
     mask_array = np.array(mask_img)
     mask_img.close()
-    class_counts = {name: 0 for name in CLASS_LIST}
-    total = 0
+    is_excluded = path.with_name(
+        path.name.replace("_mask.png", "_basecolor_exclude.txt")
+    ).exists()
+    if is_excluded:
+        print(f"Skipping excluded mask: {path}")
+        return class_counts, total, path, is_square
+
     for idx, color in CLASS_PALETTE.items():
         mask_color = np.all(mask_array == color, axis=-1)
         count = np.sum(mask_color)

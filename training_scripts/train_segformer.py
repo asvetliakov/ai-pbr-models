@@ -167,7 +167,6 @@ BATCH_SIZE_SKYRIM = 0
 USE_ACCUMULATION = False
 
 if CROP_SIZE == 256:
-    # S0 phase: 70% Skyrim / 30% MatSynth ratio
     BATCH_SIZE_SKYRIM = 40
     BATCH_SIZE_MATSYNTH = 0
     SKYRIM_WORKERS = 16
