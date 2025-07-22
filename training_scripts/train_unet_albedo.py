@@ -349,25 +349,27 @@ def transform_val_fn(example):
     diffuse = example["diffuse"]
     name = example["name"]
 
-    # albedo = center_crop(
-    #     albedo,
-    #     size=(CROP_SIZE, CROP_SIZE),
-    #     resize_to=None,
-    #     interpolation=TF.InterpolationMode.LANCZOS,
-    # )
-    # diffuse = center_crop(
-    #     diffuse,
-    #     size=(CROP_SIZE, CROP_SIZE),
-    #     resize_to=None,
-    #     interpolation=TF.InterpolationMode.LANCZOS,
-    # )
+    # Validate on 1K center crop, using 2K for validation is slow due to LPIPS
 
-    # normal = center_crop(
-    #     normal,
-    #     size=(CROP_SIZE, CROP_SIZE),
-    #     resize_to=None,
-    #     interpolation=TF.InterpolationMode.BILINEAR,
-    # )
+    albedo = center_crop(
+        albedo,
+        size=(1024, 1024),
+        resize_to=None,
+        interpolation=TF.InterpolationMode.LANCZOS,
+    )
+    diffuse = center_crop(
+        diffuse,
+        size=(1024, 1024),
+        resize_to=None,
+        interpolation=TF.InterpolationMode.LANCZOS,
+    )
+
+    normal = center_crop(
+        normal,
+        size=(1024, 1024),
+        resize_to=None,
+        interpolation=TF.InterpolationMode.BILINEAR,
+    )
 
     original_albedo = albedo
     albedo_segformer = albedo
