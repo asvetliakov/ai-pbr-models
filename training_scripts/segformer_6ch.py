@@ -96,7 +96,7 @@ def create_segformer(
     model.forward = MethodType(forward_fullres, model)
 
     if base_model_state is not None:
-        print("Loading base model state dict from S1 checkpoint.")
+        print("Loading base model state dict from checkpoint. (no-LoRA)")
         model.load_state_dict(base_model_state)
 
     if lora:

@@ -21,6 +21,9 @@ def mask_to_tensor(mask: Image.Image) -> torch.Tensor:
 
     for class_idx, color in CLASS_PALETTE.items():
         color_match = np.all(mask_np == color, axis=-1)
+        # ceramic class has been merged into stone
+        if class_idx == 6:
+            class_idx = 4
         class_mask[color_match] = class_idx
 
     return torch.from_numpy(class_mask).to(torch.int64)

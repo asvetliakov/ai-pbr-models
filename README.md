@@ -15,23 +15,23 @@ Class weights = `1 / √freq(class)`; WeightedRandomSampler active in every phas
 
 ## 1. SegFormer (S)
 
-| Phase                    | Data mix (train)    | Trainables                                        | Crop (px) | Augment† (p per sample)                                | Epochs | LR & Scheduler                                | Loss                                         |
-| ------------------------ | ------------------- | ------------------------------------------------- | --------- | ------------------------------------------------------ | ------ | --------------------------------------------- | -------------------------------------------- |
-| **S0 – Warm‑up**         | 60 % Sky / 40 % Mat | **enc + dec**                                     | 256       | flips, rot90 (1.0), colour‑jitter ±5 %*Mat only* (0.5) | 30     | OneCycle: LR 1 e‑4 → 4 e‑4 → 1 e‑5 (pct 0.15) | 0.6 CE (1/√freq) + 0.3 Focal(y=2) + 0.1 Dice |
-| **S1 – Domain focus**    | 80 % Sky / 20 % Mat | enc (top‑½ frozen) + dec + heads                  | 512       | S0 aug + SkyPhotometric 0.6 (Sky only)                 | 15     | Cosine, start 1 e‑4, ηₘᵢₙ 8 e‑6               | 0.6 CE + 0.25 Focal + 0.15 Dice              |
-| **S2 – Hi‑res mix**      | 95 % Sky / 5 % Mat  | dec + heads + **LoRA (rank 8) on enc blocks 2‑5** | 768       | flips (1.0), rot90 (1.0), SkyPhoto 0.5                 | 12     | Cosine‑restart (T₀ = 4) LR 6 e‑5              | 0.6 CE + 0.2 Focal + 0.2 Dice                |
-| **S3 – Full‑res polish** | 100 % Sky           | **BN/LN + LoRA**                                  | 1024      | _none_                                                 | 3      | Cosine, LR 2 e‑5 → 5 e‑6                      | 0.8 CE + 0.2 Dice                            |
-| **S4 – Decoder final**   | 100 % Sky           | dec‑head                                          | 1024      | _none_                                                 | 6      | Cosine, LR 1 e‑5                              | 0.9 CE + 0.1 Dice                            |
+| Phase                    | Data mix (train) | **Trainables**                                    | Crop (px) | Augment † (p per sample)           | Epochs | LR & Scheduler                                | Loss                                      |
+| ------------------------ | ---------------- | ------------------------------------------------- | --------- | ---------------------------------- | -----: | --------------------------------------------- | ----------------------------------------- |
+| **S0 – Warm-up**         | 100 % Sky        | **enc + dec + heads**                             | 256       | flips, rot90 (1.0), SkyPhoto (0.6) |     30 | OneCycle LR 1e-4 → 4e-4 → 1e-5 (pct 0.15)     | 0.6 CE (w_c) + 0.3 Focal (γ=2) + 0.1 Dice |
+| **S1 – Domain focus**    | 100 % Sky        | **enc (block 0 frozen) + dec + heads** (LLRD 0.9) | 512       | same                               |     15 | Cosine start 1e-4, ηₘᵢₙ 8e-6                  | 0.6 CE + 0.25 Focal + 0.15 Dice           |
+| **S2 – Hi-res mix**      | 100 % Sky        | **enc + dec + heads** (LLRD 0.9)                  | 768       | same                               |     12 | Cosine 8e-5 → ηₘᵢₙ 8e-6                       | 0.6 CE + 0.2 Focal + 0.2 Dice             |
+| **S3 – Full-res polish** | 100 % Sky        | **enc + dec + heads** (LLRD 0.9)                  | 1024      | _none_                             |      6 | Cosine enc 5e-6 → 2e-6, dec/head 1e-5 -> 5e-6 | 0.8 CE + 0.2 Dice                         |
+| **S4 – Decoder final**   | 100 % Sky        | **dec-head only**                                 | 1024      | _none_                             |      6 | Cosine 1e-5                                   | 0.9 CE + 0.1 Dice                         |
 
 ### 1.1 SegFormer Class‑balancing Strategy
 
-| Layer                                 | Purpose                                                        | Implementation                                                                                                            |
-| ------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| **Per‑image `WeightedRandomSampler`** | Over‑sample images rich in _minority_ materials.               | Soft exponent + Floor  *i* = `max(frac ** 0.4, 0.3)`<br>normalise so mean ≈ 1.                                            |
-| **Patch‑aware oversampling**          | Guarantee minority pixels in every crop for 256–768 px stages. | 30/20/10% crops drawn from a pre‑built minority‑tile index (3% < ceramic freq over tile < 30%) ; 70/80/90 % random crops. |
-| **Per‑pixel class weights**           | Down‑weight stone/wood inside loss.                            | `w_c = 1 / √freq_c` then normalise                                                                                        |
-| **Adaptive focal γ**                  | Extra penalty on easy majority pixels.                         | See table below                                                                                                           |
-| **Loss mask drop‑out**                | Reduce gradient dominance of majority.                         | Randomly drop 20 % of stone+wood pixels _in loss_ (`keep & rand > p`).                                                    |
+| Layer                                 | Purpose                                                        | Implementation                                                                       |
+| ------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| **Per‑image `WeightedRandomSampler`** | Over‑sample images rich in _minority_ materials.               | Soft exponent + Floor  *i* = `max(frac ** 0.4, 0.3)`<br>normalise so mean ≈ 1.       |
+| **Patch‑aware oversampling**          | Guarantee minority pixels in every crop for 256–768 px stages. | 30/20/10% crops drawn from a pre‑built minority‑tile index (freq >= 3% and >= 128px) |
+| **Per‑pixel class weights**           | Down‑weight stone/wood inside loss.                            | `w_c = 1 / √freq_c` then normalise                                                   |
+| **Adaptive focal γ**                  | Extra penalty on easy majority pixels.                         | See table below                                                                      |
+| **Loss mask drop‑out**                | Reduce gradient dominance of majority.                         | Randomly drop 20 % of stone+wood pixels _in loss_ (`keep & rand > p`).               |
 
 ### 1.2 Gamma map
 
@@ -45,7 +45,7 @@ Class weights = `1 / √freq(class)`; WeightedRandomSampler active in every phas
 | leather | 7 %         | **1.0**          | Getting sparse—leave nearly CE-like.                                                                |
 | ceramic | **2 %**     | **0.5** _(or 0)_ | Ultra-minority: keep full CE signal; γ=0.5 still gives focal’s stability without killing gradients. |
 
-_From S1_ Apply 0.9 LLRD to encoder blocks. LoRA adapters inherit the un‑decayed LR of their host block.
+_From S1_ Apply 0.9 LLRD to encoder blocks.
 _Weighted Sampler_: S0-S2, disable from stage S3
 _Loss mask dropout for majority classes_: 20% in S0/S1, disabled from S2
 

@@ -134,6 +134,15 @@ class SimpleImageDataset(Dataset):
         loss_weights = 1.0 / torch.sqrt(freq + 1e-6)  # avoid ÷0
         loss_weights *= num_classes / loss_weights.sum()
 
+        zero_mask = freq < 1e-6
+        loss_weights[zero_mask] = 0.0
+
+        # Re-normalize non-zero weights
+        nz_mask = ~zero_mask
+        if nz_mask.any():
+            scaling = nz_mask.sum() / loss_weights[nz_mask].sum()
+            loss_weights[nz_mask] *= scaling  # mean(loss_weights[nz]) == 1
+
         sample_weights_per_class = 1.0 / (cls_counts + 1e-6)
         # Boost metal class weight so it will appear more often
         # sample_weights_per_class[self.METAL_IDX] *= 1.5

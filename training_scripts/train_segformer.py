@@ -13,6 +13,7 @@ import argparse
 # from torchvision.utils import save_image
 from torchvision.transforms import functional as TF
 from torchmetrics import functional as FM
+from sklearn.metrics import confusion_matrix
 from segformer_6ch import create_segformer
 from transformers.utils.constants import (
     IMAGENET_DEFAULT_MEAN,
@@ -68,12 +69,6 @@ BASE_DIR = Path(__file__).resolve().parent
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
 
-# HYPER_PARAMETERS
-EPOCHS = 30  # Number of epochs to train
-LR = 4e-4  # Learning rate for the optimizer
-WD = 1e-2  # Weight decay for the optimizer
-# T_MAX = 10  # Max number of epochs for the learning rate scheduler
-# PHASE = "a"  # Phase of the training per plan, used for logging and saving
 PHASE = args.phase  # Phase of the training per plan, used for logging and saving
 
 # Enable TF32 for faster training on Ampere GPUs
@@ -150,54 +145,58 @@ with autocast(device_type=device.type):
     )
 
 
-CROP_SIZE = 256
+CROP_SIZE = 1024
 
 BATCH_SIZE_VALIDATION_MATSYNTH = 1
 BATCH_SIZE_VALIDATION_SKYRIM = 1
 
 MATSYNTH_COMPOSITES = False
 MATSYNTH_COLOR_AUGMENTATIONS = True
-MATSYNTH_2_CROP_CHANGE = 0.25
-MATSYNTH_4_CROP_CHANGE = 0.1
-SKYRIM_PHOTOMETRIC = 0.5  # Photometric augmentation strength for Skyrim dataset
+MATSYNTH_2_CROP_CHANGE = 0
+MATSYNTH_4_CROP_CHANGE = 1
+SKYRIM_PHOTOMETRIC = 0.0  # Photometric augmentation strength for Skyrim dataset
 
 SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0
+SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0
 
 SKYRIM_WORKERS = 0
 MATSYNTH_WORKERS = 0
 BATCH_SIZE_MATSYNTH = 0
 BATCH_SIZE_SKYRIM = 0
 
-if CROP_SIZE == 256:
-    # S0 phase: 60% Skyrim / 40% MatSynth ratio
-    BATCH_SIZE_SKYRIM = 24
-    BATCH_SIZE_MATSYNTH = 16
-    SKYRIM_WORKERS = 10
-    MATSYNTH_WORKERS = 6
+USE_ACCUMULATION = False
 
-    SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.3
+if CROP_SIZE == 256:
+    # S0 phase: 70% Skyrim / 30% MatSynth ratio
+    BATCH_SIZE_SKYRIM = 40
+    BATCH_SIZE_MATSYNTH = 0
+    SKYRIM_WORKERS = 16
+    MATSYNTH_WORKERS = 0
+    SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.2
+    # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.3
 
 if CROP_SIZE == 512:
-    BATCH_SIZE_SKYRIM = 20
-    BATCH_SIZE_MATSYNTH = 5
-    SKYRIM_WORKERS = 10
-    MATSYNTH_WORKERS = 6
-
-    SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.2
+    BATCH_SIZE_SKYRIM = 12
+    BATCH_SIZE_MATSYNTH = 0
+    SKYRIM_WORKERS = 12
+    MATSYNTH_WORKERS = 0
+    SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.2
+    # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.2
 
 if CROP_SIZE == 768:
-    BATCH_SIZE_SKYRIM = 9
-    BATCH_SIZE_MATSYNTH = 1
-    SKYRIM_WORKERS = 8
-    MATSYNTH_WORKERS = 2
-
-    SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.1
+    BATCH_SIZE_SKYRIM = 6
+    BATCH_SIZE_MATSYNTH = 0
+    SKYRIM_WORKERS = 6
+    MATSYNTH_WORKERS = 0
+    SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.1
+    # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.1
 
 if CROP_SIZE == 1024:
-    BATCH_SIZE_SKYRIM = 4
+    BATCH_SIZE_SKYRIM = 3
     BATCH_SIZE_MATSYNTH = 0
-    SKYRIM_WORKERS = 4
+    SKYRIM_WORKERS = 6
     MATSYNTH_WORKERS = 0
+    USE_ACCUMULATION = True
 
 
 BATCH_SIZE = (
@@ -384,11 +383,22 @@ def skyrim_transform_train_fn(example):
     # name = example["name"]
     # current_crop_size = get_crop_size(current_epoch, CROP_SIZES_PER_EPOCH)
 
+    # if (
+    #     SKYRIM_CERAMIC_CROP_BIAS_CHANCE > 0
+    #     and random.random() < SKYRIM_CERAMIC_CROP_BIAS_CHANCE
+    # ):
+    #     crop_data = skyrim_data_file[f"ceramic_crops_{CROP_SIZE}"]
+    #     (sample_name, x, y) = random.choice(crop_data)
+    #     specific_crop_pos = (x, y)
+    #     example = skyrim_train_dataset.get_specific_sample_for_relative_mask(
+    #         sample_name
+    #     )
+    specific_crop_pos = None
     if (
-        SKYRIM_CERAMIC_CROP_BIAS_CHANCE > 0
-        and random.random() < SKYRIM_CERAMIC_CROP_BIAS_CHANCE
+        SKYRIM_LEATHER_CROP_BIAS_CHANCE > 0
+        and random.random() < SKYRIM_LEATHER_CROP_BIAS_CHANCE
     ):
-        crop_data = skyrim_data_file[f"ceramic_crops_{CROP_SIZE}"]
+        crop_data = skyrim_data_file[f"leather_crops_{CROP_SIZE}"]
         (sample_name, x, y) = random.choice(crop_data)
         specific_crop_pos = (x, y)
         example = skyrim_train_dataset.get_specific_sample_for_relative_mask(
@@ -406,9 +416,7 @@ def skyrim_transform_train_fn(example):
         size=(CROP_SIZE, CROP_SIZE),
         augmentations=True,
         resize_to=None,
-        specific_crop_pos=(
-            specific_crop_pos if "specific_crop_pos" in locals() else None
-        ),
+        specific_crop_pos=specific_crop_pos,
     )
     final_albedo = crop_result["albedo"]
     final_normal = crop_result["normal"]
@@ -516,13 +524,19 @@ def skyrim_transform_val_fn(example):
 
 PER_CLASS_GAMMA_MAP = torch.tensor(
     [
-        0.5,  # ceramic
-        1.2,  # fabric
+        # 0.0,  # ceramic
+        # 1.2,  # fabric, S0
+        # 0.5,  # fabric, S1
+        0.3,  # fabric, S2
         1.2,  # ground
-        1.0,  # leather
-        1.5,  # metal
-        2.0,  # stone
-        1.5,  # wood
+        # 1.0,  # leather
+        0.0,  # leather
+        # 1.0,  # metal, S0, S1
+        0.8,  # metal, S2
+        # 2.0,  # stone, S0, S1
+        1.5,  # stone, S2
+        # 1.5,  # wood, S0, S1
+        1.2,  # wood, S2
     ],
     device=device,
 )  # gamma for each class
@@ -530,9 +544,12 @@ PER_CLASS_GAMMA_MAP = torch.tensor(
 
 def dropout_mask(
     labels: torch.Tensor,
-    keep_prob: float = 0.80,
-    classes=(CLASS_LIST.index("stone"), CLASS_LIST.index("wood")),
+    keep_prob: float = 0.85,
 ):
+    classes = [
+        CLASS_LIST.index("stone"),
+        # CLASS_LIST.index("wood"),
+    ]
     """
     Returns a boolean mask (B,H,W) with True for pixels kept in the loss.
     """
@@ -646,7 +663,7 @@ def calculate_loss(
     )
 
     keep_mask = None
-    if dataset == "skyrim" and PHASE in {"s0", "s1"} and key != "validation":
+    if PHASE in {"s0", "s1"} and key != "validation":
         keep_mask = dropout_mask(
             labels,
         )
@@ -686,6 +703,26 @@ def calculate_loss(
         if epoch_data[key][dataset].get("jaccard_batch_count") is None:
             epoch_data[key][dataset]["jaccard_batch_count"] = [0] * len(CLASS_LIST)
 
+        # Initialize confusion matrix accumulator
+        if epoch_data[key][dataset].get("confusion_matrix") is None:
+            epoch_data[key][dataset]["confusion_matrix"] = torch.zeros(
+                len(CLASS_LIST), len(CLASS_LIST), dtype=torch.long
+            )
+
+        # Accumulate confusion matrix (only for valid pixels)
+        valid_mask = labels != 255
+        valid_preds = preds[valid_mask].cpu()
+        valid_labels = labels[valid_mask].cpu()
+
+        if len(valid_preds) > 0:  # Only if there are valid pixels
+            batch_cm = confusion_matrix(
+                valid_labels.numpy(),
+                valid_preds.numpy(),
+                labels=list(range(len(CLASS_LIST))),
+                sample_weight=None,
+            )
+            epoch_data[key][dataset]["confusion_matrix"] += torch.from_numpy(batch_cm)
+
         # Check which classes are present in this batch
         for class_id in range(len(CLASS_LIST)):
             class_present = (flat_labels == class_id).any().item()
@@ -719,7 +756,9 @@ def calculate_loss(
         epoch_data[key][dataset]["focal_loss"] += focal_loss.item()
         epoch_data[key][dataset]["dice"] += dice.item()
 
-        total_loss = 0.6 * total_loss + 0.3 * focal_loss + 0.1 * dice
+        # total_loss = 0.6 * total_loss + 0.20 * focal_loss + 0.20 * dice
+        # total_loss = 0.8 * total_loss + 0.20 * dice
+        total_loss = 0.9 * total_loss + 0.10 * dice
 
     epoch_data[key][dataset]["total_loss"] += total_loss.item()
     epoch_data[key][dataset]["batch_count"] += 1
@@ -794,6 +833,31 @@ def calculate_final_statistics(
     epoch_data[key][dataset]["total_loss"] /= epoch_data[key][dataset]["batch_count"]
 
 
+def print_confusion_matrix(epoch_data: dict):
+    cm = epoch_data["validation"]["skyrim"]["confusion_matrix"]
+
+    # Calculate percentages (row-wise normalization)
+    cm_percent = cm.float()
+    row_sums = cm_percent.sum(dim=1, keepdim=True)
+    row_sums[row_sums == 0] = 1  # Avoid division by zero
+    cm_percent = (cm_percent / row_sums) * 100
+
+    # Header
+    header = "True\\Pred".ljust(12)
+    for i, class_name in enumerate(CLASS_LIST):
+        header += f"{class_name[:8]:>10}"
+    print(header)
+
+    # Matrix rows
+    for i, class_name in enumerate(CLASS_LIST):
+        row = f"{class_name[:8]:8}".ljust(12)
+        for j in range(len(CLASS_LIST)):
+            row += f"{cm_percent[i, j].item():>9.1f}%"
+        print(row)
+    print()  # Empty line after table
+    del epoch_data["validation"]["skyrim"]["confusion_matrix"]
+
+
 def cycle(dl: DataLoader):
     while True:
         for batch in dl:
@@ -804,37 +868,59 @@ matsynth_train_dataset.set_transform(matsynth_transform_train_fn)
 matsynth_validation_dataset.set_transform(matsynth_transform_val_fn)
 
 skyrim_train_dataset.set_transform(skyrim_transform_train_fn)
+
 skyrim_validation_dataset.set_transform(skyrim_transform_val_fn)
+
+
+def is_norm_param(name, module):
+    return (
+        isinstance(
+            module,
+            (
+                torch.nn.LayerNorm,
+                torch.nn.BatchNorm1d,
+                torch.nn.BatchNorm2d,
+                torch.nn.BatchNorm3d,
+                torch.nn.SyncBatchNorm,
+                torch.nn.GroupNorm,
+                torch.nn.InstanceNorm1d,
+                torch.nn.InstanceNorm2d,
+                torch.nn.InstanceNorm3d,
+            ),
+        )
+        or "norm" in name.lower()
+        or "bn" in name.lower()
+        or "ln" in name.lower()
+    )
 
 
 # Training loop
 def do_train():
+    EPOCHS = 7
+
     print(
         f"Starting training for {EPOCHS} epochs, on {STEPS_PER_EPOCH_TRAIN * BATCH_SIZE} Samples, MatSynth/Skyrim Batch: {BATCH_SIZE_MATSYNTH}/{BATCH_SIZE_SKYRIM}, validation on {len(matsynth_validation_dataset)} MatSynth samples and {len(skyrim_validation_dataset)} Skyrim samples."
     )
 
     model, best_model_checkpoint = get_model()
-    # for p in model.parameters():
-    #     p.requires_grad = False
+    # for n, p in model.named_parameters():
+    #     print(f"Parameter: {n}")
 
-    # for name, p in model.named_parameters():
-    #     if "decode_head" in name or "lora_" in name:
-    #         # if "decode_head" in name:
-    #         p.requires_grad = True
+    for p in model.parameters():
+        p.requires_grad = False
 
-    # Unfreeze TOP 1/2 of the encoder blocks (+ their LoRA)
-    # enc_blocks = model.base_model.model.segformer.encoder.block  # type: ignore # nn.ModuleList
-    # start_idx = len(enc_blocks) // 2  # type: ignore # halfway index
-    # for blk in enc_blocks[start_idx:]:  # type: ignore
-    #     for p in blk.parameters():  # type: ignore
-    #         p.requires_grad = True
+    for n, p in model.named_parameters():
+        if "decode_head." in n:
+            p.requires_grad = True
 
-    # Phase S4, unfreeze all BatchNorm and LayerNorm layers only
-    # for name, module in model.named_modules():
-    #     if isinstance(module, (torch.nn.BatchNorm2d, torch.nn.LayerNorm)):
-    #         # both weight (gamma) and bias (beta) of each norm layer
-    #         module.weight.requires_grad = True
-    #         module.bias.requires_grad = True
+    # for n, p in model.named_parameters():
+    #     # freeze patch embeddings 0
+    #     if ".patch_embeddings.0" in n:
+    #         p.requires_grad = False
+
+    #     # freeze all blocks in stage-0
+    #     elif ".encoder.block.0." in n:
+    #         p.requires_grad = False
 
     # # Override the BN momentum on all BatchNorm2d layers
     # for m in model.modules():
@@ -846,25 +932,25 @@ def do_train():
     #     if p.requires_grad:
     #         print(f"Trainable parameter: {n}")
 
-    matsynth_train_loader = DataLoader(
-        matsynth_train_dataset,  # type: ignore
-        batch_size=BATCH_SIZE_MATSYNTH,
-        sampler=mat_train_sampler,
-        num_workers=MATSYNTH_WORKERS,
-        prefetch_factor=2,
-        shuffle=False,
-        pin_memory=True,
-        persistent_workers=True,
-    )
+    # matsynth_train_loader = DataLoader(
+    #     matsynth_train_dataset,  # type: ignore
+    #     batch_size=BATCH_SIZE_MATSYNTH,
+    #     sampler=mat_train_sampler,
+    #     num_workers=MATSYNTH_WORKERS,
+    #     prefetch_factor=2,
+    #     shuffle=False,
+    #     pin_memory=True,
+    #     persistent_workers=True,
+    # )
 
-    matsynth_validation_loader = DataLoader(
-        matsynth_validation_dataset,  # type: ignore
-        batch_size=BATCH_SIZE_VALIDATION_MATSYNTH,
-        num_workers=2,
-        shuffle=False,
-        pin_memory=True,
-        persistent_workers=True,
-    )
+    # matsynth_validation_loader = DataLoader(
+    #     matsynth_validation_dataset,  # type: ignore
+    #     batch_size=BATCH_SIZE_VALIDATION_MATSYNTH,
+    #     num_workers=2,
+    #     shuffle=False,
+    #     pin_memory=True,
+    #     persistent_workers=True,
+    # )
 
     skyrim_train_loader = DataLoader(
         skyrim_train_dataset,
@@ -886,55 +972,83 @@ def do_train():
         persistent_workers=True,
     )
 
-    matsynth_train_iter = cycle(matsynth_train_loader)
+    # matsynth_train_iter = cycle(matsynth_train_loader)
     skyrim_train_iter = cycle(skyrim_train_loader)
 
-    # head_params, enc_params, lora_params = [], [], []
-    # for name, p in model.named_parameters():
-    #     if not p.requires_grad:
-    #         continue
-    #     if ".decode_head." in name:
-    #         head_params.append(p)
-    #     elif "lora_" in name:
-    #         lora_params.append(p)
-    #     else:
-    #         # top-half encoder (its base weights)
-    #         enc_params.append(p)
+    LR_DEC = 1e-5
+    LR_ENC = 5e-6
+    # WD = 1e-2
 
-    # # Give LoRA layers higher learning rate and no weight decay
-    # param_groups = [
-    #     {"params": head_params, "lr": LR, "weight_decay": WD},
-    #     {"params": enc_params, "lr": LR, "weight_decay": WD},
-    #     {"params": lora_params, "lr": 1e-5, "weight_decay": 0.0},
+    # --- map every parameter to its encoder depth (None = decoder / head) ---
+    gamma = 0.9
+    depth_map = {}
+    encoder_blocks = model.segformer.encoder.block  # type: ignore # list of 4 lists-of-MixFFNs
+    for depth, blk in enumerate(encoder_blocks):  # type: ignore
+        for p in blk.parameters(recurse=True):
+            depth_map[id(p)] = depth
+
+    for i, pe in enumerate(model.segformer.encoder.patch_embeddings):  # type: ignore
+        for p in pe.parameters(recurse=True):
+            depth_map[id(p)] = i
+    for i, ln in enumerate(model.segformer.encoder.layer_norm):  # type: ignore
+        for p in ln.parameters(recurse=True):
+            depth_map[id(p)] = i
+
+    param_groups = {}  # key = (lr, wd) ➜ list(params)
+
+    for module_name, module in model.named_modules():
+        for name, p in module.named_parameters(recurse=False):
+            if not p.requires_grad:
+                continue
+
+            full_name = f"{module_name}.{name}" if module_name else name
+
+            # Decide weight-decay
+            wd = (
+                0.0
+                if (
+                    is_norm_param(name, module)
+                    or "pos_embed" in full_name
+                    or "position" in full_name
+                    # or full_name.endswith(".bias")
+                )
+                else 0.0 if full_name.endswith(".bias") else 1e-3
+            )
+
+            # Decide learning-rate (encoder depth or decoder/head)
+            depth = depth_map.get(id(p), None)
+            if depth is None:
+                lr = LR_DEC  # decoder / head
+            else:
+                # LLRD: deepest block (B3) gets full LR, shallower get LR*γ^(Δdepth)
+                lr = LR_ENC * (gamma ** (3 - depth))
+
+            print(f"Parameter: {full_name}, LR: {lr}, WD: {wd}, Depth: {depth}")
+
+            # Collect by (lr, wd)
+            param_groups.setdefault((lr, wd), []).append(p)
+
+    optimizer_groups = [
+        {"params": params, "lr": lr, "weight_decay": wd}
+        for (lr, wd), params in param_groups.items()
+    ]
+
+    # head_params = [
+    #     p
+    #     for n, p in model.named_parameters()
+    #     if "decode_head." in n and p.requires_grad
     # ]
 
     # lora_params = [
     #     p for n, p in model.named_parameters() if "lora_" in n and p.requires_grad
     # ]
-    # head_params = [
-    #     p for n, p in model.named_parameters() if "decode_head" in n and p.requires_grad
-    # ]
-    # encoder_params = [
-    #     p
-    #     for n, p in model.named_parameters()
-    #     if ("encoder.block.3" in n or "encoder.block.2" in n)
-    #     and p.requires_grad
-    #     and "lora_" not in n
-    # ]
 
     # trainable = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        model.parameters(),  # type: ignore
-        # [
-        #     # {"params": head_params, "lr": 6e-6, "weight_decay": WD},  # decode-head
-        #     # {"params": lora_params, "lr": 3e-6, "weight_decay": 0.0},  # LoRA
-        #     # {"params": encoder_params, "lr": 4e-6, "weight_decay": WD},
-        #     # {"params": head_params, "lr": 1e-6, "weight_decay": WD},  # decode-head
-        #     # {"params": lora_params, "lr": 4e-6, "weight_decay": 0},  # LoRA
-        #     # {"params": encoder_params, "lr": 2e-6, "weight_decay": WD},
-        # ],
-        lr=LR,
-        weight_decay=WD,
+        # model.parameters(),  # type: ignore
+        optimizer_groups,
+        # lr=LR,
+        # weight_decay=WD,
         betas=(0.9, 0.999),
         eps=1e-8,
     )
@@ -944,23 +1058,48 @@ def do_train():
         optimizer.load_state_dict(best_model_checkpoint["optimizer_state_dict"])
 
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    #     optimizer, T_max=EPOCHS, eta_min=2e-7
+    #     optimizer, T_max=EPOCHS * STEPS_PER_EPOCH_TRAIN, eta_min=8e-6
     # )
+
+    effective_scheduler_steps = (
+        int(STEPS_PER_EPOCH_TRAIN / 2) if USE_ACCUMULATION else STEPS_PER_EPOCH_TRAIN
+    )
+
+    # 1 epoch warm-up to the base LR
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=0.1,
+        end_factor=1.0,
+        total_iters=effective_scheduler_steps,
+    )
+
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=2e-6
+    )
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     #     optimizer,
-    #     T_0=1,
+    #     T_0=3 * effective_scheduler_steps,  # 4 epochs per restart
     #     T_mult=1,
-    #     eta_min=1e-6,  # Minimum learning rate
+    #     eta_min=2e-6,
     # )
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer,
-        max_lr=LR,  # 4e-4 according to README
-        total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
-        # 15% warm-up 85% cooldown per README
-        pct_start=0.15,
-        div_factor=4.0,  # start LR = max_lr/4 = 1e-4
-        final_div_factor=40.0,  # End LR = max_lr/final_div = 1e-5
+        schedulers=[warmup, cosine],
+        milestones=[
+            effective_scheduler_steps,
+        ],  # After first epoch switch to cosine
     )
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer,
+    #     max_lr=LR,  # 4e-4 according to README
+    #     total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
+    #     # 15% warm-up 85% cooldown per README
+    #     pct_start=0.15,
+    #     # div_factor=4.0,  # start LR = max_lr/4 = 1e-4
+    #     div_factor=10.0,  # start LR = max_lr/10 = 4e-5
+    #     final_div_factor=40.0,  # End LR = max_lr/final_div = 1e-5
+    # )
     if best_model_checkpoint is not None and resume_training:
         print("Loading scheduler state from checkpoint.")
         scheduler.load_state_dict(best_model_checkpoint["scheduler_state_dict"])
@@ -1022,69 +1161,89 @@ def do_train():
             },
         }
 
+        accum_steps = 2
+
         bar = tqdm(
             range(STEPS_PER_EPOCH_TRAIN),
             desc=f"Epoch {epoch + 1}/{EPOCHS} - Training",
             unit="batch",
         )
 
-        for _ in bar:
-            matsynth_batch = next(matsynth_train_iter)
+        if USE_ACCUMULATION:
+            optimizer.zero_grad(set_to_none=True)
+
+        for i in bar:
+            # matsynth_batch = next(matsynth_train_iter)
             skyrim_batch = next(skyrim_train_iter)
 
-            input = torch.cat(
-                [matsynth_batch["pixel_values"], skyrim_batch["pixel_values"]], dim=0
-            )
-            labels_gt = torch.cat(
-                [matsynth_batch["labels"], skyrim_batch["labels"]], dim=0
-            )
+            # input = torch.cat(
+            #     [
+            #         # matsynth_batch["pixel_values"],
+            #         skyrim_batch["pixel_values"]
+            #     ],
+            #     dim=0,
+            # )
+            # labels_gt = torch.cat(
+            #     [
+            #         # matsynth_batch["labels"],
+            #         skyrim_batch["labels"]
+            #     ],
+            #     dim=0,
+            # )
+            input = skyrim_batch["pixel_values"]
+            labels_gt = skyrim_batch["labels"]
 
-            domain = torch.cat(
-                [
-                    torch.zeros(
-                        len(matsynth_batch["pixel_values"]),
-                        dtype=torch.bool,
-                        device=device,
-                    ),
-                    torch.ones(
-                        len(skyrim_batch["pixel_values"]),
-                        dtype=torch.bool,
-                        device=device,
-                    ),
-                ],
-                dim=0,
-            )  # False=MatSynth, True=Skyrim
+            # domain = torch.cat(
+            #     [
+            #         torch.zeros(
+            #             len(matsynth_batch["pixel_values"]),
+            #             dtype=torch.bool,
+            #             device=device,
+            #         ),
+            #         torch.ones(
+            #             len(skyrim_batch["pixel_values"]),
+            #             dtype=torch.bool,
+            #             device=device,
+            #         ),
+            #     ],
+            #     dim=0,
+            # )  # False=MatSynth, True=Skyrim
 
             input = input.to(device, non_blocking=True)
             labels_gt = labels_gt.to(device, non_blocking=True)
 
-            optimizer.zero_grad()
+            if not USE_ACCUMULATION:
+                optimizer.zero_grad()
+
             with autocast(device_type=device.type):
-                logits: torch.Tensor = model(pixel_values=input).logits
+                logits: torch.Tensor = model(pixel_values=input)["logits"]
 
                 # upsample logits to match the input size
-                logits_up: torch.Tensor = torch.nn.functional.interpolate(
-                    logits,
-                    size=input.shape[2:],
-                    mode="bilinear",
-                    align_corners=False,
-                )
+                # logits_up: torch.Tensor = torch.nn.functional.interpolate(
+                #     logits,
+                #     size=input.shape[2:],
+                #     mode="bilinear",
+                #     align_corners=False,
+                # )
+                logits_up = logits
                 # matsynth_logits = logits_up  # MatSynth logits
-                matsynth_logits = logits_up[~domain]  # MatSynth logits
-                skyrim_logits = logits_up[domain]
+                # matsynth_logits = logits_up[~domain]  # MatSynth logits
+                # skyrim_logits = logits_up[domain]
+                skyrim_logits = logits_up
 
-                matsynth_labels_gt = labels_gt[~domain]  # MatSynth labels
-                skyrim_labels_gt = labels_gt[domain]  # Skyrim labels
+                # matsynth_labels_gt = labels_gt[~domain]  # MatSynth labels
+                # skyrim_labels_gt = labels_gt[domain]  # Skyrim labels
+                skyrim_labels_gt = labels_gt  # Skyrim labels
 
-                matsynth_loss = calculate_loss(
-                    matsynth_logits,
-                    matsynth_labels_gt,
-                    epoch_data,
-                    key="train",
-                    dataset="matsynth",
-                )
-                if torch.isnan(matsynth_loss):
-                    raise ValueError("MatSynth Loss is NaN")
+                # matsynth_loss = calculate_loss(
+                #     matsynth_logits,
+                #     matsynth_labels_gt,
+                #     epoch_data,
+                #     key="train",
+                #     dataset="matsynth",
+                # )
+                # if torch.isnan(matsynth_loss):
+                #     raise ValueError("MatSynth Loss is NaN")
 
                 skyrim_loss = calculate_loss(
                     skyrim_logits,
@@ -1096,57 +1255,71 @@ def do_train():
                 if torch.isnan(skyrim_loss):
                     raise ValueError("Loss is NaN")
 
-                total_loss = matsynth_loss + skyrim_loss
+                # total_loss = 0.8 * matsynth_loss + skyrim_loss
+                total_loss = skyrim_loss
 
             # loss.backward()
             # optimizer.step()
+
+            if USE_ACCUMULATION:
+                total_loss = total_loss / accum_steps  # Scale loss for accumulation
 
             scaler.scale(total_loss).backward()
             # — Gradient clipping —
             # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
+            if not USE_ACCUMULATION:
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
 
-        calculate_final_statistics(epoch_data, key="train", dataset="matsynth")
+            if USE_ACCUMULATION:
+                if (i + 1) % accum_steps == 0 or (i + 1) == STEPS_PER_EPOCH_TRAIN:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
+                    # Step per effective batch
+                    scheduler.step()
+
+        # calculate_final_statistics(epoch_data, key="train", dataset="matsynth")
         calculate_final_statistics(epoch_data, key="train", dataset="skyrim")
 
         model.eval()
         with torch.no_grad():
-            for _, batch in enumerate(
-                tqdm(
-                    matsynth_validation_loader,
-                    desc=f"Epoch {epoch + 1}/{EPOCHS} - Matsynth Validation",
-                    unit="batch",
-                )
-            ):
-                input = batch["pixel_values"].to(device, non_blocking=True)
-                labels = batch["labels"].to(device, non_blocking=True)
+            # for _, batch in enumerate(
+            #     tqdm(
+            #         matsynth_validation_loader,
+            #         desc=f"Epoch {epoch + 1}/{EPOCHS} - Matsynth Validation",
+            #         unit="batch",
+            #     )
+            # ):
+            #     input = batch["pixel_values"].to(device, non_blocking=True)
+            #     labels = batch["labels"].to(device, non_blocking=True)
 
-                with autocast(device_type=device.type):
-                    logits: torch.Tensor = model(pixel_values=input).logits
+            #     with autocast(device_type=device.type):
+            #         logits: torch.Tensor = model(pixel_values=input)["logits"]
 
-                    # upsample logits to match the input size
-                    logits_up: torch.Tensor = torch.nn.functional.interpolate(
-                        logits,
-                        size=input.shape[2:],
-                        mode="bilinear",
-                        align_corners=False,
-                    )
+            #         # upsample logits to match the input size
+            #         # logits_up: torch.Tensor = torch.nn.functional.interpolate(
+            #         #     logits,
+            #         #     size=input.shape[2:],
+            #         #     mode="bilinear",
+            #         #     align_corners=False,
+            #         # )
+            #         logits_up = logits
 
-                    loss = calculate_loss(
-                        logits_up,
-                        labels,
-                        epoch_data,
-                        key="validation",
-                        dataset="matsynth",
-                    )
+            #         loss = calculate_loss(
+            #             logits_up,
+            #             labels,
+            #             epoch_data,
+            #             key="validation",
+            #             dataset="matsynth",
+            #         )
 
-                    if torch.isnan(loss):
-                        raise ValueError("Loss is NaN")
+            #         if torch.isnan(loss):
+            #             raise ValueError("Loss is NaN")
 
-            calculate_final_statistics(epoch_data, key="validation", dataset="matsynth")
+            # calculate_final_statistics(epoch_data, key="validation", dataset="matsynth")
 
             for _, batch in enumerate(
                 tqdm(
@@ -1159,15 +1332,16 @@ def do_train():
                 labels = batch["labels"].to(device, non_blocking=True)
 
                 with autocast(device_type=device.type):
-                    logits: torch.Tensor = model(pixel_values=input).logits
+                    logits: torch.Tensor = model(pixel_values=input)["logits"]
 
                     # upsample logits to match the input size
-                    logits_up: torch.Tensor = torch.nn.functional.interpolate(
-                        logits,
-                        size=input.shape[2:],
-                        mode="bilinear",
-                        align_corners=False,
-                    )
+                    # logits_up: torch.Tensor = torch.nn.functional.interpolate(
+                    #     logits,
+                    #     size=input.shape[2:],
+                    #     mode="bilinear",
+                    #     align_corners=False,
+                    # )
+                    logits_up = logits
 
                     loss = calculate_loss(
                         logits_up,
@@ -1186,6 +1360,8 @@ def do_train():
         epoch_val_loss = epoch_data["validation"]["skyrim"]["total_loss"]
 
         # scheduler.step()
+
+        print_confusion_matrix(epoch_data)
         print(json.dumps(epoch_data, indent=4))
 
         # Save checkopoint after each epoch
@@ -1193,8 +1369,10 @@ def do_train():
             {
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
-                # "base_model_state_dict": model.base_model.state_dict(),
-                # "lora_state_dict": model.state_dict(),
+                # "base_model_state_dict": (
+                #     model.base_model.state_dict() if model.base_model else None
+                # ),
+                # "lora_state_dict": (model.state_dict() if model.base_model else None),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "scaler_state_dict": scaler.state_dict(),
@@ -1214,8 +1392,12 @@ def do_train():
                 {
                     "epoch": epoch + 1,
                     "model_state_dict": model.state_dict(),
-                    # "base_model_state_dict": model.base_model.state_dict(),
-                    # "lora_state_dict": model.state_dict(),
+                    # "base_model_state_dict": (
+                    #     model.base_model.state_dict() if model.base_model else None
+                    # ),
+                    # "lora_state_dict": (
+                    #     model.state_dict() if model.base_model else None
+                    # ),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "scaler_state_dict": scaler.state_dict(),
