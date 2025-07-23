@@ -133,7 +133,7 @@ skyrim_train_sampler = WeightedRandomSampler(
     replacement=True,
 )
 
-CROP_SIZE = 768
+CROP_SIZE = 1024
 
 BATCH_SIZE_VALIDATION_MATSYNTH = 1
 BATCH_SIZE_VALIDATION_SKYRIM = 1
@@ -144,7 +144,7 @@ BATCH_SIZE_MATSYNTH = 0
 BATCH_SIZE_SKYRIM = 0
 
 MATSYNTH_COLOR_AUGMENTATIONS = False
-SKYRIM_PHOTOMETRIC = 0.3
+SKYRIM_PHOTOMETRIC = 0.15
 
 USE_ACCUMULATION = False
 
@@ -349,24 +349,25 @@ def transform_val_fn(example):
     diffuse = example["diffuse"]
     name = example["name"]
 
-    # Validate on 1K center crop, using 2K for validation is slow due to LPIPS
+    # Validate at production resolution: 1K for A4, 2K for future A5
+    val_crop_size = (1024, 1024)  # Production resolution for A4
 
     albedo = center_crop(
         albedo,
-        size=(1024, 1024),
+        size=val_crop_size,
         resize_to=None,
         interpolation=TF.InterpolationMode.LANCZOS,
     )
     diffuse = center_crop(
         diffuse,
-        size=(1024, 1024),
+        size=val_crop_size,
         resize_to=None,
         interpolation=TF.InterpolationMode.LANCZOS,
     )
 
     normal = center_crop(
         normal,
-        size=(1024, 1024),
+        size=val_crop_size,
         resize_to=None,
         interpolation=TF.InterpolationMode.BILINEAR,
     )
@@ -517,7 +518,7 @@ skyrim_validation_dataset.set_transform(transform_val_fn)
 
 # Training loop
 def do_train():
-    EPOCHS = 13
+    EPOCHS = 6
 
     print(
         f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, MatSynth/Skyrim Batch: {BATCH_SIZE_MATSYNTH}/{BATCH_SIZE_SKYRIM}, validation on {len(skyrim_validation_dataset)} Skyrim samples."
@@ -525,11 +526,11 @@ def do_train():
 
     unet_alb, segformer, checkpoint = get_model()
 
-    # for param in unet_alb.parameters():
-    #     param.requires_grad = False
+    for param in unet_alb.parameters():
+        param.requires_grad = False
 
-    # for param in unet_alb.out.parameters():
-    #     param.requires_grad = True
+    for param in unet_alb.out.parameters():
+        param.requires_grad = True
 
     # for param in unet_alb.unet.film.parameters():  # type: ignore
     #     param.requires_grad = True
@@ -588,22 +589,23 @@ def do_train():
     # skyrim_validation_iter = cycle(skyrim_validation_loader)
 
     # LR = 1e-6
-    WD = 1e-2
+    # WD = 1e-2
+    WD = 1e-3
 
-    enc_params = {
-        "params": unet_alb.unet.encoder.parameters(),
-        "lr": 5e-6,
-        "weight_decay": WD,
-    }
-    dec_params = {
-        "params": unet_alb.unet.decoder.parameters(),
-        "lr": 4e-5,
-        "weight_decay": WD,
-    }
-    film_params = {"params": unet_alb.unet.film.parameters(), "lr": 5e-5, "weight_decay": 0.0}  # type: ignore
+    # enc_params = {
+    #     "params": unet_alb.unet.encoder.parameters(),
+    #     "lr": 5e-6,
+    #     "weight_decay": WD,
+    # }
+    # dec_params = {
+    #     "params": unet_alb.unet.decoder.parameters(),
+    #     "lr": 4e-5,
+    #     "weight_decay": WD,
+    # }
+    # film_params = {"params": unet_alb.unet.film.parameters(), "lr": 5e-5, "weight_decay": 0.0}  # type: ignore
     head_params = {
         "params": unet_alb.out.parameters(),
-        "lr": 4e-5,
+        "lr": 2e-5,
         "weight_decay": WD,
     }
 
@@ -613,7 +615,8 @@ def do_train():
         # unet_alb.parameters(),  # type: ignore
         # trainable,
         # [film_params, head_params],
-        [enc_params, dec_params, film_params, head_params],
+        # [enc_params, dec_params, film_params, head_params],
+        [head_params],
         # filter(lambda p: p.requires_grad, unet_alb.parameters()),
         # lr=LR,
         # weight_decay=WD,
@@ -653,7 +656,7 @@ def do_train():
     )
 
     cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=3e-6
+        optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=5e-6
     )
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     #     optimizer,
