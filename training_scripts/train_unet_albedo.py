@@ -173,9 +173,9 @@ if CROP_SIZE == 768:
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.1
 
 if CROP_SIZE == 1024:
-    BATCH_SIZE_SKYRIM = 2
+    BATCH_SIZE_SKYRIM = 3
     BATCH_SIZE_MATSYNTH = 0
-    SKYRIM_WORKERS = 4
+    SKYRIM_WORKERS = 6
     MATSYNTH_WORKERS = 0
     USE_ACCUMULATION = True
 
@@ -518,29 +518,13 @@ skyrim_validation_dataset.set_transform(transform_val_fn)
 
 # Training loop
 def do_train():
-    EPOCHS = 12  # Increased from 8 to allow more learning with higher LRs
+    EPOCHS = 3  # A4.1: Quick adaptation for head + decoder only
 
     print(
         f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, MatSynth/Skyrim Batch: {BATCH_SIZE_MATSYNTH}/{BATCH_SIZE_SKYRIM}, validation on {len(skyrim_validation_dataset)} Skyrim samples."
     )
 
     unet_alb, segformer, checkpoint = get_model()
-
-    # Unfreeze entire encoder with gradient-based learning rates
-    # Early blocks: very conservative to preserve learned features
-    # Late blocks: more aggressive for high-resolution adaptation
-    for param in unet_alb.unet.encoder.parameters():
-        param.requires_grad = True
-
-    for param in unet_alb.out.parameters():
-        param.requires_grad = True
-
-    # Unfreeze FiLM layer for conditioning adaptation
-    for param in unet_alb.unet.film.parameters():  # type: ignore
-        param.requires_grad = True
-
-    # for param in unet_alb.unet.decoder.parameters():
-    #     param.requires_grad = True
 
     # matsynth_train_loader = DataLoader(
     #     matsynth_train_dataset,  # type: ignore
@@ -593,54 +577,36 @@ def do_train():
     # WD = 1e-2
     WD = 1e-3
 
-    # Gradient-based learning rates: lower for early blocks, higher for late blocks
-    # Encoder is a ModuleList of Down blocks
-    encoder_blocks = list(unet_alb.unet.encoder)
-    num_blocks = len(encoder_blocks)
+    # A4.1: Head + Decoder adaptation for 1024px (keep encoder frozen)
+    # Only train reconstruction components, preserve A3 feature extraction
 
-    # More aggressive LRs for better high-resolution adaptation
-    enc_early_params = {
-        "params": [
-            p for p in encoder_blocks[0].parameters()
-        ],  # Block 0: early features
-        "lr": 2e-6,  # Increased from 5e-7 for better adaptation
-        "weight_decay": WD,
-    }
-    enc_mid_params = {
-        "params": [p for p in encoder_blocks[1].parameters()],  # Block 1: mid features
-        "lr": 5e-6,  # Increased from 1e-6 for substantial learning
-        "weight_decay": WD,
-    }
-    enc_late_params = {
-        "params": [
-            p for p in encoder_blocks[2].parameters()
-        ],  # Block 2: high-res adaptation
-        "lr": 8e-6,  # Increased from 2e-6 for high-res fine-tuning
-        "weight_decay": WD,
-    }
-    param_groups = [enc_early_params, enc_mid_params, enc_late_params]
+    for param in unet_alb.parameters():
+        param.requires_grad = False
 
-    # FiLM conditioning layer - boost LR for better adaptation
-    film_params = {
-        "params": unet_alb.unet.film.parameters(),  # type: ignore
-        "lr": 8e-6,  # Increased from 3e-6 for stronger conditioning adaptation
-        "weight_decay": 0.0,  # No weight decay for FiLM (as in A1-A3)
+    # Freeze encoder - keep A3 learned features
+    for param in unet_alb.unet.decoder.parameters():
+        param.requires_grad = True
+
+    # Freeze FiLM - keep A3 conditioning patterns
+    for param in unet_alb.out.parameters():
+        param.requires_grad = True
+
+    param_groups = []
+
+    # Decoder parameters - adapt spatial reconstruction for 1024px
+    decoder_params = {
+        "params": unet_alb.unet.decoder.parameters(),
+        "lr": 2e-5,  # Conservative LR for stable adaptation
+        "weight_decay": WD,
     }
-    param_groups.append(film_params)
+    param_groups.append(decoder_params)
 
     head_params = {
         "params": unet_alb.out.parameters(),
-        "lr": 2e-5,  # Increased from 1e-5 for better output adaptation
+        "lr": 3e-5,  # Slightly higher for output head adaptation
         "weight_decay": WD,
     }
     param_groups.append(head_params)
-
-    # Print parameter group info
-    print(f"Encoder blocks: {num_blocks}")
-    print(f"Parameter groups: {len(param_groups)}")
-    for i, group in enumerate(param_groups):
-        param_count = sum(p.numel() for p in group["params"])
-        print(f"  Group {i}: LR={group['lr']:.2e}, params={param_count:,}")
 
     # trainable = [p for p in unet_alb.parameters() if p.requires_grad]
 
@@ -660,7 +626,7 @@ def do_train():
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     #     optimizer, T_max=EPOCHS, eta_min=LR * 0.1
     # )
-    # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
+    # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
 
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(
     #     optimizer,
@@ -671,16 +637,16 @@ def do_train():
     #     final_div_factor=20,  # final LR ≈ max/20 ≈ 1e-5
     # )
     # 1 epoch warm-up to the base LR
-    warmup = torch.optim.lr_scheduler.LinearLR(
-        optimizer,
-        start_factor=0.1,
-        end_factor=1.0,
-        total_iters=effective_scheduler_steps,
-    )
+    # warmup = torch.optim.lr_scheduler.LinearLR(
+    #     optimizer,
+    #     start_factor=0.1,
+    #     end_factor=1.0,
+    #     total_iters=effective_scheduler_steps,
+    # )
 
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=1e-7
-    )
+    # cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #     optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=1e-6
+    # )
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     #     optimizer,
     #     T_0=3 * effective_scheduler_steps,  # 4 epochs per restart
@@ -688,15 +654,19 @@ def do_train():
     #     eta_min=2e-6,
     # )
 
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer,
-        schedulers=[warmup, cosine],
-        milestones=[
-            effective_scheduler_steps,
-        ],  # After first epoch switch to cosine
-    )
+    # scheduler = torch.optim.lr_scheduler.SequentialLR(
+    #     optimizer,
+    #     schedulers=[warmup, cosine],
+    #     milestones=[
+    #         effective_scheduler_steps,
+    #     ],  # After first epoch switch to cosine
+    # )
 
-    if checkpoint is not None and resume_training:
+    # Fixed LRs - your base LRs are already optimal as proven by Epoch 1 results
+    # No scheduler needed since Epoch 1 performance was best with these exact LRs
+    scheduler = None  # Keep LRs constant at optimal levels
+
+    if checkpoint is not None and resume_training and scheduler is not None:
         print("Loading scheduler state from checkpoint.")
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
@@ -814,23 +784,21 @@ def do_train():
             if USE_ACCUMULATION:
                 total_loss = total_loss / accum_steps  # Scale loss for accumulation
 
-            # loss.backward()
-            # optimizer.step()
-
             scaler.scale(total_loss).backward()
 
             if not USE_ACCUMULATION:
                 scaler.step(optimizer)
                 scaler.update()
-                scheduler.step()
-
-            if USE_ACCUMULATION:
+                if scheduler is not None:
+                    scheduler.step()
+            else:  # USE_ACCUMULATION is True
                 if (i + 1) % accum_steps == 0 or (i + 1) == STEPS_PER_EPOCH_TRAIN:
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
                     # Step per effective batch
-                    scheduler.step()
+                    if scheduler is not None:
+                        scheduler.step()
 
         calculate_avg(epoch_data, key="train")
 
@@ -965,15 +933,18 @@ def do_train():
         print(json.dumps(epoch_data, indent=4))
 
         # Save checkopoint after each epoch
+        checkpoint_data = {
+            "epoch": epoch + 1,
+            "unet_albedo_model_state_dict": unet_alb.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scaler_state_dict": scaler.state_dict(),
+            "epoch_data": epoch_data,
+        }
+        if scheduler is not None:
+            checkpoint_data["scheduler_state_dict"] = scheduler.state_dict()
+
         torch.save(
-            {
-                "epoch": epoch + 1,
-                "unet_albedo_model_state_dict": unet_alb.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "scaler_state_dict": scaler.state_dict(),
-                "epoch_data": epoch_data,
-            },
+            checkpoint_data,
             output_dir / f"checkpoint_epoch_{epoch + 1}.pt",
         )
         # Save epoch data to a JSON file
@@ -983,15 +954,19 @@ def do_train():
         if unet_albedo_total_val_loss < best_val_loss_albedo:
             best_val_loss_albedo = unet_albedo_total_val_loss
             no_improvement_count_albedo = 0
+
+            best_model_data = {
+                "epoch": epoch + 1,
+                "unet_albedo_model_state_dict": unet_alb.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
+                "epoch_data": epoch_data,
+            }
+            if scheduler is not None:
+                best_model_data["scheduler_state_dict"] = scheduler.state_dict()
+
             torch.save(
-                {
-                    "epoch": epoch + 1,
-                    "unet_albedo_model_state_dict": unet_alb.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
-                    "scaler_state_dict": scaler.state_dict(),
-                    "epoch_data": epoch_data,
-                },
+                best_model_data,
                 output_dir / "best_model.pt",
             )
 
