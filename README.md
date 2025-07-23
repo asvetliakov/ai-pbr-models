@@ -53,14 +53,14 @@ _Loss mask dropout for majority classes_: 20% in S0/S1, disabled from S2
 
 ## 2. UNet‑Albedo (A)
 
-| Phase  | Dataset mix | Trainables           | **Crop / Feed (px)** | Augment†                  | Epochs | Optimiser & LR (per‑group)                            | Scheduler                           | Loss                           |
-| ------ | ----------- | -------------------- | -------------------- | ------------------------- | -----: | ----------------------------------------------------- | ----------------------------------- | ------------------------------ |
-| **A1** | 100 % Sky   | full UNet + FiLM     | **256**              | flips · rot, SkyPhoto 0.6 |     45 | AdamW — enc 2e‑4 · dec 2e‑4 · FiLM 3e‑4 · head 2.5e‑4 | OneCycle (pct 0.2, cos, final 1e‑5) | L1 + 0.15 MS-SSIM + 0.05 LPIPS |
-| **A2** | 100 % Sky   | **enc + dec + FiLM** | **512**              | A1 aug + SkyPhoto 0.6     |     14 | AdamW — enc 8e‑6 · dec 3e‑5 · FiLM 4e‑5 · head 3e‑5   | cosine‑14, eta_min=5e-6             | same                           |
-| **A3** | 100 % Sky   | **enc + dec + FiLM** | **768**              | A1 aug + SkyPhoto 0.3     |     12 | AdamW — enc 5e‑6 · dec 4e‑5 · FiLM 5e‑5 · head 4e‑5   | cosine‑12, eta_min=3e-6             | same                           |
-| **A4** | 100 % Sky   | **1 × 1 head only**  | **1 024**            | A1 aug + SkyPhoto 0.15    |      5 | AdamW — head 2e‑5, WD=1e‑3                            | cosine‑5, eta_min=5e-6              | same                           |
+| Phase  | Dataset mix | Trainables                     | **Crop / Feed (px)** | Augment†                  | Epochs | Optimiser & LR (per‑group)                                                    | Scheduler                           | Loss                           |
+| ------ | ----------- | ------------------------------ | -------------------- | ------------------------- | -----: | ----------------------------------------------------------------------------- | ----------------------------------- | ------------------------------ |
+| **A1** | 100 % Sky   | full UNet + FiLM               | **256**              | flips · rot, SkyPhoto 0.6 |     45 | AdamW — enc 2e‑4 · dec 2e‑4 · FiLM 3e‑4 · head 2.5e‑4                         | OneCycle (pct 0.2, cos, final 1e‑5) | L1 + 0.15 MS-SSIM + 0.05 LPIPS |
+| **A2** | 100 % Sky   | **enc + dec + FiLM**           | **512**              | A1 aug + SkyPhoto 0.6     |     14 | AdamW — enc 8e‑6 · dec 3e‑5 · FiLM 4e‑5 · head 3e‑5                           | cosine‑14, eta_min=5e-6             | same                           |
+| **A3** | 100 % Sky   | **enc + dec + FiLM**           | **768**              | A1 aug + SkyPhoto 0.3     |     12 | AdamW — enc 5e‑6 · dec 4e‑5 · FiLM 5e‑5 · head 4e‑5                           | cosine‑12, eta_min=3e-6             | same                           |
+| **A4** | 100 % Sky   | **full encoder + FiLM + head** | **1 024**            | A1 aug + SkyPhoto 0.15    |      8 | AdamW — enc_early 5e‑7 · enc_mid 1e‑6 · enc_late 2e‑6 · FiLM 3e‑6 · head 1e‑5 | cosine‑8, eta_min=1e-7              | same                           |
 
-_Save the **best A3** checkpoint → encoder donor for Maps._
+_Save the **best A4** checkpoint → encoder donor for Maps._
 
 ---
 
@@ -72,7 +72,7 @@ Import weights from A3, re-init first conv (kaiming normal on conv.weight)
 
 |  Phase | Dataset   | Encoder init           | Trainables        | **Crop / Feed (px)** | Epochs | Optimiser & LR                                | Scheduler              | Core losses |
 | -----: | --------- | ---------------------- | ----------------- | -------------------- | -----: | --------------------------------------------- | ---------------------- | ----------- |
-| **M0** | 100 % Sky | best A2 (strict False) | enc + dec + heads | **768**              |      6 | AdamW: enc 5e‑5 (LLRD 0.9^d) · dec/heads 2e‑4 | cosine‑6,eta_min=5e-6  | See table   |
+| **M0** | 100 % Sky | best A4 (strict False) | enc + dec + heads | **768**              |      6 | AdamW: enc 5e‑5 (LLRD 0.9^d) · dec/heads 2e‑4 | cosine‑6,eta_min=5e-6  | See table   |
 | **M1** | 100 % Sky | from M0                | enc + dec + heads | **1 024**            |     12 | AdamW: enc 1e‑5 (LLRD) · dec/heads 4e‑5       | cosine‑12,eta_min=1e-6 | same        |
 
 ## 3.2 Height & AO

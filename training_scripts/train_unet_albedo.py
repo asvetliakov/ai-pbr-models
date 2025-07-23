@@ -173,9 +173,9 @@ if CROP_SIZE == 768:
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.1
 
 if CROP_SIZE == 1024:
-    BATCH_SIZE_SKYRIM = 3
+    BATCH_SIZE_SKYRIM = 2
     BATCH_SIZE_MATSYNTH = 0
-    SKYRIM_WORKERS = 6
+    SKYRIM_WORKERS = 4
     MATSYNTH_WORKERS = 0
     USE_ACCUMULATION = True
 
@@ -518,7 +518,7 @@ skyrim_validation_dataset.set_transform(transform_val_fn)
 
 # Training loop
 def do_train():
-    EPOCHS = 6
+    EPOCHS = 12  # Increased from 8 to allow more learning with higher LRs
 
     print(
         f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, MatSynth/Skyrim Batch: {BATCH_SIZE_MATSYNTH}/{BATCH_SIZE_SKYRIM}, validation on {len(skyrim_validation_dataset)} Skyrim samples."
@@ -526,19 +526,20 @@ def do_train():
 
     unet_alb, segformer, checkpoint = get_model()
 
-    for param in unet_alb.parameters():
-        param.requires_grad = False
+    # Unfreeze entire encoder with gradient-based learning rates
+    # Early blocks: very conservative to preserve learned features
+    # Late blocks: more aggressive for high-resolution adaptation
+    for param in unet_alb.unet.encoder.parameters():
+        param.requires_grad = True
 
     for param in unet_alb.out.parameters():
         param.requires_grad = True
 
-    # for param in unet_alb.unet.film.parameters():  # type: ignore
-    #     param.requires_grad = True
+    # Unfreeze FiLM layer for conditioning adaptation
+    for param in unet_alb.unet.film.parameters():  # type: ignore
+        param.requires_grad = True
 
     # for param in unet_alb.unet.decoder.parameters():
-    #     param.requires_grad = True
-
-    # for param in unet_alb.unet.film.parameters():  # type: ignore
     #     param.requires_grad = True
 
     # matsynth_train_loader = DataLoader(
@@ -592,39 +593,61 @@ def do_train():
     # WD = 1e-2
     WD = 1e-3
 
-    # enc_params = {
-    #     "params": unet_alb.unet.encoder.parameters(),
-    #     "lr": 5e-6,
-    #     "weight_decay": WD,
-    # }
-    # dec_params = {
-    #     "params": unet_alb.unet.decoder.parameters(),
-    #     "lr": 4e-5,
-    #     "weight_decay": WD,
-    # }
-    # film_params = {"params": unet_alb.unet.film.parameters(), "lr": 5e-5, "weight_decay": 0.0}  # type: ignore
-    head_params = {
-        "params": unet_alb.out.parameters(),
-        "lr": 2e-5,
+    # Gradient-based learning rates: lower for early blocks, higher for late blocks
+    # Encoder is a ModuleList of Down blocks
+    encoder_blocks = list(unet_alb.unet.encoder)
+    num_blocks = len(encoder_blocks)
+
+    # More aggressive LRs for better high-resolution adaptation
+    enc_early_params = {
+        "params": [
+            p for p in encoder_blocks[0].parameters()
+        ],  # Block 0: early features
+        "lr": 2e-6,  # Increased from 5e-7 for better adaptation
         "weight_decay": WD,
     }
+    enc_mid_params = {
+        "params": [p for p in encoder_blocks[1].parameters()],  # Block 1: mid features
+        "lr": 5e-6,  # Increased from 1e-6 for substantial learning
+        "weight_decay": WD,
+    }
+    enc_late_params = {
+        "params": [
+            p for p in encoder_blocks[2].parameters()
+        ],  # Block 2: high-res adaptation
+        "lr": 8e-6,  # Increased from 2e-6 for high-res fine-tuning
+        "weight_decay": WD,
+    }
+    param_groups = [enc_early_params, enc_mid_params, enc_late_params]
+
+    # FiLM conditioning layer - boost LR for better adaptation
+    film_params = {
+        "params": unet_alb.unet.film.parameters(),  # type: ignore
+        "lr": 8e-6,  # Increased from 3e-6 for stronger conditioning adaptation
+        "weight_decay": 0.0,  # No weight decay for FiLM (as in A1-A3)
+    }
+    param_groups.append(film_params)
+
+    head_params = {
+        "params": unet_alb.out.parameters(),
+        "lr": 2e-5,  # Increased from 1e-5 for better output adaptation
+        "weight_decay": WD,
+    }
+    param_groups.append(head_params)
+
+    # Print parameter group info
+    print(f"Encoder blocks: {num_blocks}")
+    print(f"Parameter groups: {len(param_groups)}")
+    for i, group in enumerate(param_groups):
+        param_count = sum(p.numel() for p in group["params"])
+        print(f"  Group {i}: LR={group['lr']:.2e}, params={param_count:,}")
 
     # trainable = [p for p in unet_alb.parameters() if p.requires_grad]
 
     optimizer = torch.optim.AdamW(
-        # unet_alb.parameters(),  # type: ignore
-        # trainable,
-        # [film_params, head_params],
-        # [enc_params, dec_params, film_params, head_params],
-        [head_params],
-        # filter(lambda p: p.requires_grad, unet_alb.parameters()),
-        # lr=LR,
-        # weight_decay=WD,
-        # [enc_params, dec_params, film_params, head_params],
-        # lr=LR,
+        param_groups,
         betas=(0.9, 0.999),
         eps=1e-8,
-        # weight_decay=WD,
     )
     if checkpoint is not None and resume_training:
         print("Loading optimizer state from checkpoint.")
@@ -656,7 +679,7 @@ def do_train():
     )
 
     cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=5e-6
+        optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=1e-7
     )
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     #     optimizer,
@@ -689,7 +712,7 @@ def do_train():
         ]
         print(f"Loading best validation loss from checkpoint: {best_val_loss_albedo}")
 
-    patience = 6
+    patience = 8  # Increased patience for higher LRs
     no_improvement_count_albedo = 0
 
     output_dir = Path(f"./weights/{PHASE}/unet_albedo")
