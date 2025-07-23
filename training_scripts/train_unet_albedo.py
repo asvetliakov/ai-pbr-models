@@ -133,7 +133,7 @@ skyrim_train_sampler = WeightedRandomSampler(
     replacement=True,
 )
 
-CROP_SIZE = 512
+CROP_SIZE = 768
 
 BATCH_SIZE_VALIDATION_MATSYNTH = 1
 BATCH_SIZE_VALIDATION_SKYRIM = 1
@@ -144,7 +144,7 @@ BATCH_SIZE_MATSYNTH = 0
 BATCH_SIZE_SKYRIM = 0
 
 MATSYNTH_COLOR_AUGMENTATIONS = False
-SKYRIM_PHOTOMETRIC = 0.6
+SKYRIM_PHOTOMETRIC = 0.3
 
 USE_ACCUMULATION = False
 
@@ -165,9 +165,9 @@ if CROP_SIZE == 512:
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.2
 
 if CROP_SIZE == 768:
-    BATCH_SIZE_SKYRIM = 6
+    BATCH_SIZE_SKYRIM = 4
     BATCH_SIZE_MATSYNTH = 0
-    SKYRIM_WORKERS = 6
+    SKYRIM_WORKERS = 4
     MATSYNTH_WORKERS = 0
     # SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.1
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.1
@@ -517,7 +517,7 @@ skyrim_validation_dataset.set_transform(transform_val_fn)
 
 # Training loop
 def do_train():
-    EPOCHS = 15
+    EPOCHS = 13
 
     print(
         f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, MatSynth/Skyrim Batch: {BATCH_SIZE_MATSYNTH}/{BATCH_SIZE_SKYRIM}, validation on {len(skyrim_validation_dataset)} Skyrim samples."
@@ -592,18 +592,18 @@ def do_train():
 
     enc_params = {
         "params": unet_alb.unet.encoder.parameters(),
-        "lr": 8e-6,
+        "lr": 5e-6,
         "weight_decay": WD,
     }
     dec_params = {
         "params": unet_alb.unet.decoder.parameters(),
-        "lr": 3e-5,
+        "lr": 4e-5,
         "weight_decay": WD,
     }
-    film_params = {"params": unet_alb.unet.film.parameters(), "lr": 4e-5, "weight_decay": 0.0}  # type: ignore
+    film_params = {"params": unet_alb.unet.film.parameters(), "lr": 5e-5, "weight_decay": 0.0}  # type: ignore
     head_params = {
         "params": unet_alb.out.parameters(),
-        "lr": 3e-5,
+        "lr": 4e-5,
         "weight_decay": WD,
     }
 
@@ -653,7 +653,7 @@ def do_train():
     )
 
     cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=5e-6
+        optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=3e-6
     )
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     #     optimizer,
