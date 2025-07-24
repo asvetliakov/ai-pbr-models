@@ -149,7 +149,7 @@ SKYRIM_PHOTOMETRIC = 0.15
 USE_ACCUMULATION = False
 
 if CROP_SIZE == 256:
-    BATCH_SIZE_SKYRIM = 24
+    BATCH_SIZE_SKYRIM = 16
     BATCH_SIZE_MATSYNTH = 0
     SKYRIM_WORKERS = 16
     MATSYNTH_WORKERS = 0
@@ -157,25 +157,27 @@ if CROP_SIZE == 256:
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.3
 
 if CROP_SIZE == 512:
-    BATCH_SIZE_SKYRIM = 8
+    BATCH_SIZE_SKYRIM = 4
     BATCH_SIZE_MATSYNTH = 0
-    SKYRIM_WORKERS = 8
+    SKYRIM_WORKERS = 4
     MATSYNTH_WORKERS = 0
     # SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.2
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.2
+    USE_ACCUMULATION = True
 
 if CROP_SIZE == 768:
-    BATCH_SIZE_SKYRIM = 4
+    BATCH_SIZE_SKYRIM = 2
     BATCH_SIZE_MATSYNTH = 0
     SKYRIM_WORKERS = 4
     MATSYNTH_WORKERS = 0
     # SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.1
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.1
+    USE_ACCUMULATION = True
 
 if CROP_SIZE == 1024:
-    BATCH_SIZE_SKYRIM = 3
+    BATCH_SIZE_SKYRIM = 2
     BATCH_SIZE_MATSYNTH = 0
-    SKYRIM_WORKERS = 6
+    SKYRIM_WORKERS = 4
     MATSYNTH_WORKERS = 0
     USE_ACCUMULATION = True
 
@@ -213,6 +215,23 @@ def get_model():
         )
         checkpoint = torch.load(load_checkpoint_path, map_location=device)
         unet_alb.load_state_dict(checkpoint["unet_albedo_model_state_dict"])
+
+        # Filter out head parameters when loading (due to architecture change)
+        # state_dict = checkpoint["unet_albedo_model_state_dict"]
+        # model_state_dict = {
+        #     k: v for k, v in state_dict.items() if not k.startswith("out.")
+        # }
+
+        # # Load backbone only, skip head (new 2-layer head will train from scratch)
+        # missing_keys, unexpected_keys = unet_alb.load_state_dict(
+        #     model_state_dict, strict=False
+        # )
+        # print(
+        #     f"Loaded backbone from checkpoint. Skipped head parameters: {[k for k in state_dict.keys() if k.startswith('out.')]}"
+        # )
+        # print(
+        #     f"New head parameters will train from scratch: {[k for k in unet_alb.state_dict().keys() if k.startswith('out.')]}"
+        # )
 
     # Create segformer and load best weights
     segformer = create_segformer(
@@ -518,7 +537,7 @@ skyrim_validation_dataset.set_transform(transform_val_fn)
 
 # Training loop
 def do_train():
-    EPOCHS = 3  # A4.1: Quick adaptation for head + decoder only
+    EPOCHS = 8
 
     print(
         f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, MatSynth/Skyrim Batch: {BATCH_SIZE_MATSYNTH}/{BATCH_SIZE_SKYRIM}, validation on {len(skyrim_validation_dataset)} Skyrim samples."
@@ -577,36 +596,55 @@ def do_train():
     # WD = 1e-2
     WD = 1e-3
 
-    # A4.1: Head + Decoder adaptation for 1024px (keep encoder frozen)
-    # Only train reconstruction components, preserve A3 feature extraction
+    # A3.1: Full UNet adaptation (except bottleneck & FiLM)
+    # Train entire feature processing pipeline for 6-channel input
 
     for param in unet_alb.parameters():
         param.requires_grad = False
 
-    # Freeze encoder - keep A3 learned features
     for param in unet_alb.unet.decoder.parameters():
         param.requires_grad = True
 
-    # Freeze FiLM - keep A3 conditioning patterns
     for param in unet_alb.out.parameters():
         param.requires_grad = True
 
+    # for n, p in unet_alb.named_parameters():
+    #     if p.requires_grad:
+    #         print(f"Trainable parameter: {n}")
+
     param_groups = []
 
-    # Decoder parameters - adapt spatial reconstruction for 1024px
-    decoder_params = {
-        "params": unet_alb.unet.decoder.parameters(),
-        "lr": 2e-5,  # Conservative LR for stable adaptation
-        "weight_decay": WD,
-    }
-    param_groups.append(decoder_params)
+    # enc_params = [
+    #     p
+    #     for n, p in unet_alb.named_parameters()
+    #     if (
+    #         "unet.inc." in n
+    #         or "unet.encoder." in n
+    #         or "unet.bot." in n
+    #         or "unet.bottleneck_attention." in n
+    #     )
+    #     and p.requires_grad
+    # ]
+    # param_groups.append({"params": enc_params, "lr": 5e-6, "weight_decay": WD})
 
-    head_params = {
-        "params": unet_alb.out.parameters(),
-        "lr": 3e-5,  # Slightly higher for output head adaptation
-        "weight_decay": WD,
-    }
-    param_groups.append(head_params)
+    decoder_params = [
+        p
+        for n, p in unet_alb.named_parameters()
+        if "unet.decoder." in n and p.requires_grad
+    ]
+    param_groups.append({"params": decoder_params, "lr": 1.5e-5, "weight_decay": WD})
+
+    # film_params = [
+    #     p
+    #     for n, p in unet_alb.named_parameters()
+    #     if "unet.film." in n and p.requires_grad
+    # ]
+    # param_groups.append({"params": film_params, "lr": 5e-5, "weight_decay": 0.0})
+
+    head_params = [
+        p for n, p in unet_alb.named_parameters() if "out." in n and p.requires_grad
+    ]
+    param_groups.append({"params": head_params, "lr": 2e-5, "weight_decay": WD})
 
     # trainable = [p for p in unet_alb.parameters() if p.requires_grad]
 
@@ -637,15 +675,22 @@ def do_train():
     #     final_div_factor=20,  # final LR ≈ max/20 ≈ 1e-5
     # )
     # 1 epoch warm-up to the base LR
-    # warmup = torch.optim.lr_scheduler.LinearLR(
-    #     optimizer,
-    #     start_factor=0.1,
-    #     end_factor=1.0,
-    #     total_iters=effective_scheduler_steps,
-    # )
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=0.1,
+        end_factor=1.0,
+        total_iters=effective_scheduler_steps,
+    )
 
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=2e-6
+    )
+    # Gentle cosine decay for inc layer adaptation
+    # Start at 2e-4, decay to 5e-5 over 3 epochs for stable convergence
     # cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-    #     optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=1e-6
+    #     optimizer,
+    #     T_max=(EPOCHS - 1) * effective_scheduler_steps,
+    #     eta_min=5e-5,  # End at 25% of starting LR
     # )
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     #     optimizer,
@@ -654,17 +699,13 @@ def do_train():
     #     eta_min=2e-6,
     # )
 
-    # scheduler = torch.optim.lr_scheduler.SequentialLR(
-    #     optimizer,
-    #     schedulers=[warmup, cosine],
-    #     milestones=[
-    #         effective_scheduler_steps,
-    #     ],  # After first epoch switch to cosine
-    # )
-
-    # Fixed LRs - your base LRs are already optimal as proven by Epoch 1 results
-    # No scheduler needed since Epoch 1 performance was best with these exact LRs
-    scheduler = None  # Keep LRs constant at optimal levels
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup, cosine],
+        milestones=[
+            effective_scheduler_steps,
+        ],  # After first epoch switch to cosine
+    )
 
     if checkpoint is not None and resume_training and scheduler is not None:
         print("Loading scheduler state from checkpoint.")
