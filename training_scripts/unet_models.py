@@ -70,22 +70,6 @@ class LightweightSelfAttention(nn.Module):
 # -------------------------------------------------
 # Core blocks
 # -------------------------------------------------
-# class DoubleConv(nn.Module):
-#     """(Conv → GN → SiLU) × 2"""
-
-#     def __init__(self, in_ch: int, out_ch: int, groups: int = 8):
-#         super().__init__()
-#         self.conv = nn.Sequential(
-#             nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
-#             nn.GroupNorm(groups, out_ch),
-#             nn.SiLU(inplace=True),
-#             nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
-#             nn.GroupNorm(groups, out_ch),
-#             nn.SiLU(inplace=True),
-#         )
-
-#     def forward(self, x):
-#         return self.conv(x)
 
 
 class DoubleConv(nn.Module):
