@@ -287,8 +287,10 @@ class UNetAlbedo(nn.Module):
         super().__init__()
         self.unet = _UNetBackbone(in_ch, base=96, depth=4, cond_ch=cond_ch)
         self.out = nn.Sequential(
-            nn.Conv2d(96, 3, 1),
-            nn.Sigmoid(),  # keeps outputs in (0,1)
+            nn.Conv2d(96, 48, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(48, 3, 1),
+            nn.Sigmoid(),
         )
 
     def forward(self, img, segfeat=None):
@@ -299,34 +301,34 @@ class UNetAlbedo(nn.Module):
 # -------------------------------------------------
 # 2b · UNet‑Maps
 # -------------------------------------------------
-class UNetMaps(nn.Module):
-    """
-    Predicts 4 PBR maps in a single forward pass:
+# class UNetMaps(nn.Module):
+#     """
+#     Predicts 4 PBR maps in a single forward pass:
 
-        • Roughness  ‖ 1ch, [0,1]
-        • Metallic   ‖ 1ch, [0,1]
-        • AO         ‖ 1ch, [0,1]
-        • Height     ‖ 1ch, [0,1]
-    """
+#         • Roughness  ‖ 1ch, [0,1]
+#         • Metallic   ‖ 1ch, [0,1]
+#         • AO         ‖ 1ch, [0,1]
+#         • Height     ‖ 1ch, [0,1]
+#     """
 
-    def __init__(self, in_ch: int = 3, cond_ch: Optional[int] = 256):
-        super().__init__()
-        self.unet = _UNetBackbone(in_ch, base=96, depth=4, cond_ch=cond_ch)
+#     def __init__(self, in_ch: int = 3, cond_ch: Optional[int] = 256):
+#         super().__init__()
+#         self.unet = _UNetBackbone(in_ch, base=96, depth=4, cond_ch=cond_ch)
 
-        # individual 1×1 heads
-        self.head_rough = nn.Sequential(nn.Conv2d(96, 1, 1), nn.Sigmoid())
-        self.head_metal = nn.Sequential(nn.Conv2d(96, 1, 1), nn.Sigmoid())
-        self.head_ao = nn.Sequential(nn.Conv2d(96, 1, 1), nn.Sigmoid())
-        self.head_h = nn.Sequential(nn.Conv2d(96, 1, 1), nn.Sigmoid())
+#         # individual 1×1 heads
+#         self.head_rough = nn.Sequential(nn.Conv2d(96, 1, 1), nn.Sigmoid())
+#         self.head_metal = nn.Sequential(nn.Conv2d(96, 1, 1), nn.Sigmoid())
+#         self.head_ao = nn.Sequential(nn.Conv2d(96, 1, 1), nn.Sigmoid())
+#         self.head_h = nn.Sequential(nn.Conv2d(96, 1, 1), nn.Sigmoid())
 
-    def forward(self, img, segfeat=None):
-        x = self.unet(img, segfeat)
-        return {
-            "rough": self.head_rough(x),
-            "metal": self.head_metal(x),
-            "ao": self.head_ao(x),
-            "height": self.head_h(x),
-        }
+#     def forward(self, img, segfeat=None):
+#         x = self.unet(img, segfeat)
+#         return {
+#             "rough": self.head_rough(x),
+#             "metal": self.head_metal(x),
+#             "ao": self.head_ao(x),
+#             "height": self.head_h(x),
+#         }
 
 
 class UNetSingleChannel(nn.Module):
@@ -337,7 +339,11 @@ class UNetSingleChannel(nn.Module):
         self.unet = _UNetBackbone(
             in_ch, base=96, depth=4, cond_ch=cond_ch, mask_film=mask_film
         )
-        self.head = nn.Conv2d(96, 1, 1)
+        self.head = nn.Sequential(
+            nn.Conv2d(96, 48, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(48, 1, 1),  # Single channel output for roughness/metallic/etc
+        )
 
     def forward(self, img, segfeat=None, gray_mask=None):
         x = self.unet(img, segfeat, gray_mask)
