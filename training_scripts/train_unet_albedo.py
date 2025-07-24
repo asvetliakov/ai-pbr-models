@@ -147,6 +147,7 @@ MATSYNTH_COLOR_AUGMENTATIONS = False
 SKYRIM_PHOTOMETRIC = 0.15
 
 USE_ACCUMULATION = False
+ACCUM_STEPS = 2
 
 if CROP_SIZE == 256:
     BATCH_SIZE_SKYRIM = 16
@@ -175,11 +176,12 @@ if CROP_SIZE == 768:
     USE_ACCUMULATION = True
 
 if CROP_SIZE == 1024:
-    BATCH_SIZE_SKYRIM = 2
+    BATCH_SIZE_SKYRIM = 1
     BATCH_SIZE_MATSYNTH = 0
-    SKYRIM_WORKERS = 4
+    SKYRIM_WORKERS = 2
     MATSYNTH_WORKERS = 0
     USE_ACCUMULATION = True
+    ACCUM_STEPS = 4
 
 BATCH_SIZE = (
     BATCH_SIZE_MATSYNTH
@@ -658,7 +660,9 @@ def do_train():
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     effective_scheduler_steps = (
-        int(STEPS_PER_EPOCH_TRAIN / 2) if USE_ACCUMULATION else STEPS_PER_EPOCH_TRAIN
+        int(STEPS_PER_EPOCH_TRAIN / ACCUM_STEPS)
+        if USE_ACCUMULATION
+        else STEPS_PER_EPOCH_TRAIN
     )
 
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -747,8 +751,6 @@ def do_train():
             },
         }
 
-        accum_steps = 2
-
         bar = tqdm(
             range(STEPS_PER_EPOCH_TRAIN),
             desc=f"Epoch {epoch + 1}/{EPOCHS} - Training",
@@ -823,7 +825,7 @@ def do_train():
             total_loss = unet_albedo_loss
 
             if USE_ACCUMULATION:
-                total_loss = total_loss / accum_steps  # Scale loss for accumulation
+                total_loss = total_loss / ACCUM_STEPS  # Scale loss for accumulation
 
             scaler.scale(total_loss).backward()
 
@@ -833,7 +835,7 @@ def do_train():
                 if scheduler is not None:
                     scheduler.step()
             else:  # USE_ACCUMULATION is True
-                if (i + 1) % accum_steps == 0 or (i + 1) == STEPS_PER_EPOCH_TRAIN:
+                if (i + 1) % ACCUM_STEPS == 0 or (i + 1) == STEPS_PER_EPOCH_TRAIN:
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
