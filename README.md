@@ -15,13 +15,13 @@ Class weights = `1 / √freq(class)`; WeightedRandomSampler active in every phas
 
 ## 1. SegFormer (S)
 
-| Phase                    | Data mix (train) | **Trainables**                                    | Crop (px) | Augment † (p per sample)           | Epochs | LR & Scheduler                                | Loss                                      |
-| ------------------------ | ---------------- | ------------------------------------------------- | --------- | ---------------------------------- | -----: | --------------------------------------------- | ----------------------------------------- |
-| **S0 – Warm-up**         | 100 % Sky        | **enc + dec + heads**                             | 256       | flips, rot90 (1.0), SkyPhoto (0.6) |     30 | OneCycle LR 1e-4 → 4e-4 → 1e-5 (pct 0.15)     | 0.6 CE (w_c) + 0.3 Focal (γ=2) + 0.1 Dice |
-| **S1 – Domain focus**    | 100 % Sky        | **enc (block 0 frozen) + dec + heads** (LLRD 0.9) | 512       | same                               |     15 | Cosine start 1e-4, ηₘᵢₙ 8e-6                  | 0.6 CE + 0.25 Focal + 0.15 Dice           |
-| **S2 – Hi-res mix**      | 100 % Sky        | **enc + dec + heads** (LLRD 0.9)                  | 768       | same                               |     12 | Cosine 8e-5 → ηₘᵢₙ 8e-6                       | 0.6 CE + 0.2 Focal + 0.2 Dice             |
-| **S3 – Full-res polish** | 100 % Sky        | **enc + dec + heads** (LLRD 0.9)                  | 1024      | _none_                             |      6 | Cosine enc 5e-6 → 2e-6, dec/head 1e-5 -> 5e-6 | 0.8 CE + 0.2 Dice                         |
-| **S4 – Decoder final**   | 100 % Sky        | **dec-head only**                                 | 1024      | _none_                             |      6 | Cosine 1e-5                                   | 0.9 CE + 0.1 Dice                         |
+| Phase                    | Data mix (train) | **Trainables**                                    | Crop (px) | Augment † (p per sample)           | Epochs | LR & Scheduler                                | Loss                    |
+| ------------------------ | ---------------- | ------------------------------------------------- | --------- | ---------------------------------- | -----: | --------------------------------------------- | ----------------------- |
+| **S0 – Warm-up**         | 100 % Sky        | **enc + dec + heads**                             | 256       | flips, rot90 (1.0), SkyPhoto (0.6) |     30 | OneCycle LR 1e-4 → 4e-4 → 1e-5 (pct 0.15)     | 0.8 Focal CE + 0.2 Dice |
+| **S1 – Domain focus**    | 100 % Sky        | **enc (block 0 frozen) + dec + heads** (LLRD 0.9) | 512       | same                               |     15 | Cosine start 1e-4, ηₘᵢₙ 8e-6                  | same                    |
+| **S2 – Hi-res mix**      | 100 % Sky        | **enc + dec + heads** (LLRD 0.9)                  | 768       | same                               |     12 | Cosine 8e-5 → ηₘᵢₙ 8e-6                       | same                    |
+| **S3 – Full-res polish** | 100 % Sky        | **enc + dec + heads** (LLRD 0.9)                  | 1024      | _none_                             |      6 | Cosine enc 5e-6 → 2e-6, dec/head 1e-5 -> 5e-6 | same                    |
+| **S4 – Decoder final**   | 100 % Sky        | **dec-head only**                                 | 1024      | _none_                             |      6 | Cosine 1e-5                                   | same                    |
 
 ### 1.1 SegFormer Class‑balancing Strategy
 
@@ -31,22 +31,20 @@ Class weights = `1 / √freq(class)`; WeightedRandomSampler active in every phas
 | **Patch‑aware oversampling**          | Guarantee minority pixels in every crop for 256–768 px stages. | 30/20/10% crops drawn from a pre‑built minority‑tile index (freq >= 3% and >= 128px) |
 | **Per‑pixel class weights**           | Down‑weight stone/wood inside loss.                            | `w_c = 1 / √freq_c` then normalise                                                   |
 | **Adaptive focal γ**                  | Extra penalty on easy majority pixels.                         | See table below                                                                      |
-| **Loss mask drop‑out**                | Reduce gradient dominance of majority.                         | Randomly drop 20 % of stone+wood pixels _in loss_ (`keep & rand > p`).               |
+| **Loss mask drop‑out**                | Reduce gradient dominance of majority.                         | Randomly drop 20 % of stone pixels _in loss_ (`keep & rand > p`).                    |
 
 ### 1.2 Gamma map
 
-| Class   | Pixel share | Recommended γ    | Why                                                                                                 |
-| ------- | ----------- | ---------------- | --------------------------------------------------------------------------------------------------- |
-| stone   | **36 %**    | **2.0**          | Dominant & usually easy; strong damping keeps its gradients in check.                               |
-| metal   | 18 %        | **1.5**          | Still frequent but slightly harder (different hues).                                                |
-| wood    | 17 %        | **1.5**          | Similar to metal in share and difficulty.                                                           |
-| fabric  | 10 %        | **1.2**          | Mid-tier class; moderate damping.                                                                   |
-| ground  | 9 %         | **1.2**          | Same tier as fabric.                                                                                |
-| leather | 7 %         | **1.0**          | Getting sparse—leave nearly CE-like.                                                                |
-| ceramic | **2 %**     | **0.5** _(or 0)_ | Ultra-minority: keep full CE signal; γ=0.5 still gives focal’s stability without killing gradients. |
+| Class   | Pixel share | Recommended γ | Why                                                                   |
+| ------- | ----------- | ------------- | --------------------------------------------------------------------- |
+| stone   | **36 %**    | **2.0**       | Dominant & usually easy; strong damping keeps its gradients in check. |
+| metal   | 18 %        | **1.5**       | Still frequent but slightly harder (different hues).                  |
+| wood    | 17 %        | **1.5**       | Similar to metal in share and difficulty.                             |
+| fabric  | 10 %        | **1.2**       | Mid-tier class; moderate damping.                                     |
+| ground  | 9 %         | **1.2**       | Same tier as fabric.                                                  |
+| leather | 7 %         | **1.0**       | Getting sparse—leave nearly CE-like.                                  |
 
 _From S1_ Apply 0.9 LLRD to encoder blocks.
-_Weighted Sampler_: S0-S2, disable from stage S3
 _Loss mask dropout for majority classes_: 20% in S0/S1, disabled from S2
 
 ---

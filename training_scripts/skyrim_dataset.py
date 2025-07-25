@@ -127,6 +127,17 @@ class SkyrimDataset(Dataset):
 
         raise ValueError(f"Sample with name {name} not found")
 
+    def get_specific_sample(
+        self, idx: int, call_transform=False
+    ) -> dict[str, Image.Image]:
+        samples = (
+            self.split == "train"
+            and self.all_train_samples
+            or self.all_validation_samples
+        )
+
+        return self._process_sample(samples[idx], call_tansform=call_transform)
+
     def _process_sample(self, sample, call_tansform: bool) -> dict[str, Image.Image]:
         # Clone sample to avoid modifying the original
         sample = sample.copy()
