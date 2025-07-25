@@ -84,19 +84,20 @@ class SkyrimPhotometric:
     wrapped in an outer p_aug probability.
     """
 
-    def __init__(self, p_aug=0.6):
+    def __init__(self, p_aug=0.6, ao_enabled=False):
         self.p_aug = p_aug
         self.ao = AOTint()
         self.wb = ColdWhiteBalance()
         self.vg = Vignette()
+        self.ao_enabled = ao_enabled
 
     def __call__(self, img):
         if random.random() > self.p_aug:
             return img
         # torchvision img → tensor in [0,1]
         img = TF.to_tensor(img) if not torch.is_tensor(img) else img
-        # if random.random() < 0.5:
-        #     img = self.ao(img)
+        if random.random() < 0.5 and self.ao_enabled:
+            img = self.ao(img)
         if random.random() < 0.5:
             img = self.wb(img)
         if random.random() < 0.5:
