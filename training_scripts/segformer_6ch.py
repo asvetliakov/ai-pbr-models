@@ -52,49 +52,6 @@ def create_segformer(
     # Update config so future code knows to expect 6 channels
     model.config.num_channels = 6
 
-    # 2. Swap ADE classifier -> num_labels classes
-    in_ch = model.decode_head.classifier.in_channels  # 256
-    model.decode_head.classifier = torch.nn.Conv2d(
-        in_channels=in_ch,  # 256
-        out_channels=num_labels,
-        kernel_size=1,
-        stride=1,
-        padding=0,
-    ).to(
-        device
-    )  # type: ignore
-
-    # 3. Add lightweight upsampling layer
-    model.decode_head.upsampler = torch.nn.Sequential(
-        torch.nn.ConvTranspose2d(num_labels, 64, 2, 2),  # num_labels -> 64, stride 2
-        torch.nn.BatchNorm2d(64),
-        torch.nn.ReLU(inplace=True),
-        torch.nn.ConvTranspose2d(64, 64, 2, 2),  # 64 -> 64, stride 2  (now full-res)
-        torch.nn.BatchNorm2d(64),
-        torch.nn.ReLU(inplace=True),
-        torch.nn.Conv2d(64, num_labels, 1),  # 64 -> num_labels classes
-    ).to(device)
-
-    # ➎ monkey-patch a new forward that stops before old interpolate
-    def forward_fullres(self, pixel_values, **kwargs):
-        # make sure encoder returns all hidden states
-        outputs = self.segformer(
-            pixel_values=pixel_values, output_hidden_states=True, **kwargs
-        )
-        hidden_states = (
-            outputs.hidden_states
-        )  # tuple of 4 tensors:contentReference[oaicite:3]{index=3}
-
-        # run decode_head's original 'linear_c' + upsample loop
-        fused = self.decode_head.forward(encoder_hidden_states=hidden_states)
-        logits_full = self.decode_head.upsampler(fused)  # final H × W
-        return {
-            "logits": logits_full,
-            "hidden_states": outputs.hidden_states,
-        }
-
-    model.forward = MethodType(forward_fullres, model)
-
     if base_model_state is not None:
         print("Loading base model state dict from checkpoint. (no-LoRA)")
         model.load_state_dict(base_model_state)
