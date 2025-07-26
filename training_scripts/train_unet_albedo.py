@@ -21,10 +21,8 @@ from transformers.utils.constants import (
     IMAGENET_DEFAULT_MEAN,
     IMAGENET_DEFAULT_STD,
 )
-from train_dataset import SimpleImageDataset, normalize_normal_map
 from augmentations import (
     get_random_crop,
-    selective_aug,
     center_crop,
 )
 from skyrim_photometric_aug import SkyrimPhotometric
@@ -85,34 +83,11 @@ torch.backends.cudnn.benchmark = (
 
 VISUAL_SAMPLES_COUNT = 10  # Number of samples to visualize in validation
 
-matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
 skyrim_dir = (BASE_DIR / "../skyrim_processed/pbr").resolve()
 
 skyrim_data_file_path = (BASE_DIR / "../skyrim_data_unet_albedo.json").resolve()
 
 device = torch.device("cuda")
-
-matsynth_train_dataset = SimpleImageDataset(
-    matsynth_dir=str(matsynth_dir),
-    split="train",
-)
-
-matsynth_validation_dataset = SimpleImageDataset(
-    matsynth_dir=str(matsynth_dir), split="validation", skip_init=True
-)
-
-matsynth_validation_dataset.all_validation_samples = (
-    matsynth_train_dataset.all_validation_samples
-)
-loss_weights, sample_weights = matsynth_train_dataset.get_weights()
-
-loss_weights = loss_weights.to(device)  # type: ignore
-
-mat_train_sampler = WeightedRandomSampler(
-    weights=sample_weights.tolist(),
-    num_samples=len(sample_weights),
-    replacement=True,
-)
 
 skyrim_train_dataset = SkyrimDataset(
     skyrim_dir=str(skyrim_dir),
@@ -133,67 +108,47 @@ skyrim_train_sampler = WeightedRandomSampler(
     replacement=True,
 )
 
-CROP_SIZE = 1024
+CROP_SIZE = 256
 
-BATCH_SIZE_VALIDATION_MATSYNTH = 1
 BATCH_SIZE_VALIDATION_SKYRIM = 1
 
 SKYRIM_WORKERS = 0
-MATSYNTH_WORKERS = 0
-BATCH_SIZE_MATSYNTH = 0
 BATCH_SIZE_SKYRIM = 0
 
-MATSYNTH_COLOR_AUGMENTATIONS = False
-SKYRIM_PHOTOMETRIC = 0.15
+SKYRIM_PHOTOMETRIC = 0.6
 
 USE_ACCUMULATION = False
 ACCUM_STEPS = 2
 
 if CROP_SIZE == 256:
     BATCH_SIZE_SKYRIM = 16
-    BATCH_SIZE_MATSYNTH = 0
     SKYRIM_WORKERS = 16
-    MATSYNTH_WORKERS = 0
     # SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.2
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.3
 
 if CROP_SIZE == 512:
     BATCH_SIZE_SKYRIM = 4
-    BATCH_SIZE_MATSYNTH = 0
     SKYRIM_WORKERS = 4
-    MATSYNTH_WORKERS = 0
     # SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.2
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.2
     USE_ACCUMULATION = True
 
 if CROP_SIZE == 768:
     BATCH_SIZE_SKYRIM = 2
-    BATCH_SIZE_MATSYNTH = 0
     SKYRIM_WORKERS = 4
-    MATSYNTH_WORKERS = 0
     # SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.1
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.1
     USE_ACCUMULATION = True
 
 if CROP_SIZE == 1024:
     BATCH_SIZE_SKYRIM = 1
-    BATCH_SIZE_MATSYNTH = 0
     SKYRIM_WORKERS = 2
-    MATSYNTH_WORKERS = 0
     USE_ACCUMULATION = True
     ACCUM_STEPS = 4
 
-BATCH_SIZE = (
-    BATCH_SIZE_MATSYNTH
-    if BATCH_SIZE_MATSYNTH > BATCH_SIZE_SKYRIM
-    else BATCH_SIZE_SKYRIM
-)
+BATCH_SIZE = BATCH_SIZE_SKYRIM
 
-MIN_SAMPLES_TRAIN = len(
-    matsynth_train_dataset
-    if BATCH_SIZE_MATSYNTH > BATCH_SIZE_SKYRIM
-    else skyrim_train_dataset
-)
+MIN_SAMPLES_TRAIN = len(skyrim_train_dataset)
 STEPS_PER_EPOCH_TRAIN = math.ceil(MIN_SAMPLES_TRAIN / BATCH_SIZE)
 
 resume_training = args.resume
@@ -218,23 +173,6 @@ def get_model():
         checkpoint = torch.load(load_checkpoint_path, map_location=device)
         unet_alb.load_state_dict(checkpoint["unet_albedo_model_state_dict"])
 
-        # Filter out head parameters when loading (due to architecture change)
-        # state_dict = checkpoint["unet_albedo_model_state_dict"]
-        # model_state_dict = {
-        #     k: v for k, v in state_dict.items() if not k.startswith("out.")
-        # }
-
-        # # Load backbone only, skip head (new 2-layer head will train from scratch)
-        # missing_keys, unexpected_keys = unet_alb.load_state_dict(
-        #     model_state_dict, strict=False
-        # )
-        # print(
-        #     f"Loaded backbone from checkpoint. Skipped head parameters: {[k for k in state_dict.keys() if k.startswith('out.')]}"
-        # )
-        # print(
-        #     f"New head parameters will train from scratch: {[k for k in unet_alb.state_dict().keys() if k.startswith('out.')]}"
-        # )
-
     # Create segformer and load best weights
     segformer = create_segformer(
         num_labels=len(CLASS_LIST),
@@ -243,7 +181,7 @@ def get_model():
         frozen=True,
     )
     segformer_best_weights_path = (
-        BASE_DIR / "../weights/s4/segformer/best_model.pt"
+        BASE_DIR / "../weights/s3/segformer/best_model.pt"
     ).resolve()
     print("Loading Segformer weights from:", segformer_best_weights_path)
     segformer_checkpoint = torch.load(segformer_best_weights_path, map_location=device)
@@ -252,61 +190,6 @@ def get_model():
         segformer_checkpoint["model_state_dict"],
     )
     return unet_alb, segformer, checkpoint
-
-
-def matsynth_transform_train_fn(example):
-    albedo = example["basecolor"]
-    normal = example["normal"]
-    diffuse = example["diffuse"]
-    category_name = example["category_name"]
-    name = example["name"]
-
-    crop_result = get_random_crop(
-        albedo=albedo,
-        normal=normal,
-        size=(CROP_SIZE, CROP_SIZE),
-        diffuse=diffuse,
-        resize_to=None,
-        augmentations=True,
-    )
-    albedo = crop_result["albedo"]
-    normal = crop_result["normal"]
-    diffuse = crop_result["diffuse"]
-
-    albedo_orig = albedo
-    albedo_segformer = albedo
-
-    albedo_orig = TF.to_tensor(albedo_orig)
-
-    if MATSYNTH_COLOR_AUGMENTATIONS:
-        diffuse, normal = selective_aug(diffuse, normal, category=category_name)
-
-    diffuse = TF.to_tensor(diffuse)  # type: ignore
-    diffuse = TF.normalize(
-        diffuse, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
-    )
-
-    normal = TF.to_tensor(normal)  # type: ignore
-    normal = TF.normalize(
-        normal, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
-    )
-
-    # Concatenate albedo and normal along the channel dimension
-    diffuse_and_normal = torch.cat((diffuse, normal), dim=0)  # type: ignore
-
-    albedo_segformer = TF.to_tensor(albedo_segformer)
-    albedo_segformer = TF.normalize(
-        albedo_segformer, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
-    )
-    albedo_and_normal_segformer = torch.cat((albedo_segformer, normal), dim=0)
-
-    return {
-        "diffuse_and_normal": diffuse_and_normal,
-        "albedo_and_normal_segformer": albedo_and_normal_segformer,
-        "albedo": albedo_orig,
-        "normal": normal,
-        "name": name,
-    }
 
 
 def skyrim_transform_train_fn(example):
@@ -530,42 +413,19 @@ def cycle(dl: DataLoader):
             yield batch
 
 
-# matsynth_train_dataset.set_transform(matsynth_transform_train_fn)
-# matsynth_validation_dataset.set_transform(transform_val_fn)
-
 skyrim_train_dataset.set_transform(skyrim_transform_train_fn)
 skyrim_validation_dataset.set_transform(transform_val_fn)
 
 
 # Training loop
 def do_train():
-    EPOCHS = 8
+    EPOCHS = 45
 
     print(
-        f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, MatSynth/Skyrim Batch: {BATCH_SIZE_MATSYNTH}/{BATCH_SIZE_SKYRIM}, validation on {len(skyrim_validation_dataset)} Skyrim samples."
+        f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} samples, validation on {len(skyrim_validation_dataset)} samples."
     )
 
     unet_alb, segformer, checkpoint = get_model()
-
-    # matsynth_train_loader = DataLoader(
-    #     matsynth_train_dataset,  # type: ignore
-    #     batch_size=BATCH_SIZE_MATSYNTH,
-    #     sampler=train_sampler,
-    #     num_workers=3,
-    #     prefetch_factor=2,
-    #     shuffle=False,
-    #     pin_memory=True,
-    #     persistent_workers=True,
-    # )
-
-    # matsynth_validation_loader = DataLoader(
-    #     matsynth_validation_dataset,  # type: ignore
-    #     batch_size=BATCH_SIZE_VALIDATION_MATSYNTH,
-    #     num_workers=3,
-    #     shuffle=False,
-    #     pin_memory=True,
-    #     persistent_workers=True,
-    # )
 
     skyrim_train_loader = DataLoader(
         skyrim_train_dataset,
@@ -588,27 +448,23 @@ def do_train():
         persistent_workers=True,
     )
 
-    # matsynth_train_iter = cycle(matsynth_train_loader)
     skyrim_train_iter = cycle(skyrim_train_loader)
-
-    # matsynth_validation_iter = cycle(matsynth_validation_loader)
-    # skyrim_validation_iter = cycle(skyrim_validation_loader)
 
     # LR = 1e-6
     # WD = 1e-2
-    WD = 1e-3
+    WD = 1e-2
 
     # A3.1: Full UNet adaptation (except bottleneck & FiLM)
     # Train entire feature processing pipeline for 6-channel input
 
-    for param in unet_alb.parameters():
-        param.requires_grad = False
+    # for param in unet_alb.parameters():
+    #     param.requires_grad = False
 
-    for param in unet_alb.unet.decoder.parameters():
-        param.requires_grad = True
+    # for param in unet_alb.unet.decoder.parameters():
+    #     param.requires_grad = True
 
-    for param in unet_alb.out.parameters():
-        param.requires_grad = True
+    # for param in unet_alb.out.parameters():
+    #     param.requires_grad = True
 
     # for n, p in unet_alb.named_parameters():
     #     if p.requires_grad:
@@ -616,37 +472,37 @@ def do_train():
 
     param_groups = []
 
-    # enc_params = [
-    #     p
-    #     for n, p in unet_alb.named_parameters()
-    #     if (
-    #         "unet.inc." in n
-    #         or "unet.encoder." in n
-    #         or "unet.bot." in n
-    #         or "unet.bottleneck_attention." in n
-    #     )
-    #     and p.requires_grad
-    # ]
-    # param_groups.append({"params": enc_params, "lr": 5e-6, "weight_decay": WD})
+    enc_params = [
+        p
+        for n, p in unet_alb.named_parameters()
+        if (
+            "unet.inc." in n
+            or "unet.encoder." in n
+            or "unet.bot." in n
+            or "unet.bottleneck_attention." in n
+        )
+        and p.requires_grad
+    ]
+    param_groups.append({"params": enc_params, "lr": 2e-4, "weight_decay": WD})
 
     decoder_params = [
         p
         for n, p in unet_alb.named_parameters()
         if "unet.decoder." in n and p.requires_grad
     ]
-    param_groups.append({"params": decoder_params, "lr": 1.5e-5, "weight_decay": WD})
+    param_groups.append({"params": decoder_params, "lr": 2e-4, "weight_decay": WD})
 
-    # film_params = [
-    #     p
-    #     for n, p in unet_alb.named_parameters()
-    #     if "unet.film." in n and p.requires_grad
-    # ]
-    # param_groups.append({"params": film_params, "lr": 5e-5, "weight_decay": 0.0})
+    film_params = [
+        p
+        for n, p in unet_alb.named_parameters()
+        if "unet.film." in n and p.requires_grad
+    ]
+    param_groups.append({"params": film_params, "lr": 3e-4, "weight_decay": 0.0})
 
     head_params = [
         p for n, p in unet_alb.named_parameters() if "out." in n and p.requires_grad
     ]
-    param_groups.append({"params": head_params, "lr": 2e-5, "weight_decay": WD})
+    param_groups.append({"params": head_params, "lr": 2.5e-4, "weight_decay": WD})
 
     # trainable = [p for p in unet_alb.parameters() if p.requires_grad]
 
@@ -670,25 +526,25 @@ def do_train():
     # )
     # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
 
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #     optimizer,
-    #     max_lr=[2e-4, 2e-4, 3e-4, 2.5e-4],
-    #     total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
-    #     pct_start=0.2,
-    #     anneal_strategy="cos",
-    #     final_div_factor=20,  # final LR ≈ max/20 ≈ 1e-5
-    # )
-    # 1 epoch warm-up to the base LR
-    warmup = torch.optim.lr_scheduler.LinearLR(
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
-        start_factor=0.1,
-        end_factor=1.0,
-        total_iters=effective_scheduler_steps,
+        max_lr=[2e-4, 2e-4, 3e-4, 2.5e-4],
+        total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
+        pct_start=0.2,
+        anneal_strategy="cos",
+        final_div_factor=20,  # final LR ≈ max/20 ≈ 1e-5
     )
+    # 1 epoch warm-up to the base LR
+    # warmup = torch.optim.lr_scheduler.LinearLR(
+    #     optimizer,
+    #     start_factor=0.1,
+    #     end_factor=1.0,
+    #     total_iters=effective_scheduler_steps,
+    # )
 
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=2e-6
-    )
+    # cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #     optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=2e-6
+    # )
     # Gentle cosine decay for inc layer adaptation
     # Start at 2e-4, decay to 5e-5 over 3 epochs for stable convergence
     # cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -703,13 +559,13 @@ def do_train():
     #     eta_min=2e-6,
     # )
 
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer,
-        schedulers=[warmup, cosine],
-        milestones=[
-            effective_scheduler_steps,
-        ],  # After first epoch switch to cosine
-    )
+    # scheduler = torch.optim.lr_scheduler.SequentialLR(
+    #     optimizer,
+    #     schedulers=[warmup, cosine],
+    #     milestones=[
+    #         effective_scheduler_steps,
+    #     ],  # After first epoch switch to cosine
+    # )
 
     if checkpoint is not None and resume_training and scheduler is not None:
         print("Loading scheduler state from checkpoint.")
@@ -761,33 +617,10 @@ def do_train():
             optimizer.zero_grad(set_to_none=True)
 
         for i in bar:
-            # matsynth_batch = next(matsynth_train_iter)
             skyrim_batch = next(skyrim_train_iter)
 
-            # diffuse_and_normal = torch.cat(
-            #     [
-            #         # matsynth_batch["diffuse_and_normal"],
-            #         skyrim_batch["diffuse_and_normal"],
-            #     ],
-            #     dim=0,
-            # )
             diffuse_and_normal = skyrim_batch["diffuse_and_normal"]
-            # albedo_gt = torch.cat(
-            #     [
-            #         # matsynth_batch["albedo"],
-            #         skyrim_batch["albedo"]
-            #     ],
-            #     dim=0,
-            # )
             albedo_gt = skyrim_batch["albedo"]
-
-            # albedo_and_normal_segformer = torch.cat(
-            #     [
-            #         # matsynth_batch["albedo_and_normal_segformer"],
-            #         skyrim_batch["albedo_and_normal_segformer"],
-            #     ],
-            #     dim=0,
-            # )
             albedo_and_normal_segformer = skyrim_batch["albedo_and_normal_segformer"]
 
             diffuse_and_normal = diffuse_and_normal.to(device, non_blocking=True)
@@ -802,9 +635,9 @@ def do_train():
             with torch.no_grad():
                 with autocast(device_type=device.type):
                     #  Get Segoformer ouput for FiLM
-                    seg_feats = segformer(albedo_and_normal_segformer)["hidden_states"][
-                        -1
-                    ].detach()
+                    seg_feats = segformer(
+                        albedo_and_normal_segformer, output_hidden_states=True
+                    )["hidden_states"][-1].detach()
 
             with autocast(device_type=device.type):
                 # Get UNet-Albedo prediction
@@ -857,63 +690,12 @@ def do_train():
                     unit="batch",
                 )
             ):
-                # matsynth_batch = next(matsynth_validation_iter)
-                # skyrim_batch = next(skyrim_validation_iter)
-
-                # diffuse_and_normal = torch.cat(
-                #     [
-                #         # matsynth_batch["diffuse_and_normal"],
-                #         skyrim_batch["diffuse_and_normal"],
-                #     ],
-                #     dim=0,
-                # )
                 diffuse_and_normal = batch["diffuse_and_normal"]
-
-                # albedo_and_normal_segformer = torch.cat(
-                #     [
-                #         # matsynth_batch["albedo_and_normal_segformer"],
-                #         skyrim_batch["albedo_and_normal_segformer"],
-                #     ],
-                #     dim=0,
-                # )
                 albedo_and_normal_segformer = batch["albedo_and_normal_segformer"]
-
-                # albedo_gt = torch.cat(
-                #     [
-                #         # matsynth_batch["albedo"],
-                #         skyrim_batch["albedo"]
-                #     ],
-                #     dim=0,
-                # )
                 albedo_gt = batch["albedo"]
-
-                # normal = torch.cat(
-                #     [
-                #         # matsynth_batch["normal"],
-                #         skyrim_batch["normal"]
-                #     ],
-                #     dim=0,
-                # )
                 normal = batch["normal"]
-                # names = list(matsynth_batch["name"]) + list(skyrim_batch["name"])
-                # names = skyrim_batch["name"]
                 names = batch["name"]
-
-                # original_diffuse = torch.cat(
-                #     [
-                #         # matsynth_batch["original_diffuse"],
-                #         skyrim_batch["original_diffuse"],
-                #     ],
-                #     dim=0,
-                # )
                 original_diffuse = batch["original_diffuse"]
-                # original_normal = torch.cat(
-                #     [
-                #         # matsynth_batch["original_normal"],
-                #         skyrim_batch["original_normal"],
-                #     ],
-                #     dim=0,
-                # )
                 original_normal = batch["original_normal"]
 
                 diffuse_and_normal = diffuse_and_normal.to(device, non_blocking=True)
@@ -926,9 +708,9 @@ def do_train():
                 original_normal = original_normal.to(device, non_blocking=True)
 
                 with autocast(device_type=device.type):
-                    seg_feats = segformer(albedo_and_normal_segformer)["hidden_states"][
-                        -1
-                    ].detach()
+                    seg_feats = segformer(
+                        albedo_and_normal_segformer, output_hidden_states=True
+                    )["hidden_states"][-1].detach()
                     albedo_pred = unet_alb(diffuse_and_normal, seg_feats)
 
                 calculate_unet_albedo_loss(
