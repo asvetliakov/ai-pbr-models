@@ -38,7 +38,7 @@ unet_alb = UNetAlbedo(
     cond_ch=512,
 ).to(device)
 
-checkpoint_path = (BASE_DIR / "../weights/a3/unet_albedo/best_model.pt").resolve()
+checkpoint_path = (BASE_DIR / "../weights/a4/unet_albedo/best_model.pt").resolve()
 checkpoint = torch.load(checkpoint_path, map_location=device)
 unet_alb.load_state_dict(checkpoint["unet_albedo_model_state_dict"])
 for param in unet_alb.parameters():
@@ -49,18 +49,15 @@ for param in unet_alb.parameters():
 segformer = create_segformer(
     num_labels=len(CLASS_LIST),
     device=device,
-    lora=True,
+    lora=False,
     frozen=True,
 )
 segformer_best_weights_path = (
-    BASE_DIR / "../weights/s5/segformer/best_model.pt"
+    BASE_DIR / "../weights/s3/segformer/best_model.pt"
 ).resolve()
 segformer_checkpoint = torch.load(segformer_best_weights_path, map_location=device)
-segformer.base_model.load_state_dict(
-    segformer_checkpoint["base_model_state_dict"],
-)
 segformer.load_state_dict(
-    segformer_checkpoint["lora_state_dict"],
+    segformer_checkpoint["model_state_dict"],
 )
 
 

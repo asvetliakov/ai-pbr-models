@@ -677,7 +677,7 @@ def do_train():
 
     skyrim_train_iter = cycle(skyrim_train_loader)
 
-    LR_DEC = 1e-5
+    LR_DEC = 1e-6
     LR_ENC = 3e-7
     # WD = 1e-2
 

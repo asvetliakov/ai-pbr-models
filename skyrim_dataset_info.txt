@@ -32,63 +32,74 @@ Ceramic heterogeneous ( 1/1.5/3% <= freq < 30% ) crops found: 256x256: 1209, 512
 ----------------------- Segformer: Ceramic has been merged into stone ----------------------
 
 Pixels per class (All):
-fabric: 733528861 pixels (10.4438%)
-ground: 661862150 pixels (9.4234%)
-leather: 521434807 pixels (7.4241%)
-metal: 1244207143 pixels (17.7147%)
-stone: 2686787218 pixels (38.2538%)
-wood: 1175756876 pixels (16.7401%)
+fabric: 735573587 pixels (10.4698%)
+ground: 661862150 pixels (9.4207%)
+leather: 525012980 pixels (7.4728%)
+metal: 1247248006 pixels (17.7528%)
+stone: 2684390338 pixels (38.2084%)
+wood: 1171562572 pixels (16.6755%)
 
-Samples per class with >1% ratio:
-fabric: 580 samples
-ground: 276 samples
-leather: 619 samples
-metal: 1040 samples
-stone: 1247 samples
-wood: 662 samples
+Samples per class with >40% ratio:
+fabric: 352 samples
+ground: 268 samples
+leather: 343 samples
+metal: 636 samples
+stone: 1146 samples
+wood: 543 samples
 
 Validation set size: 319
-Training set size: 2874
+Training set size: 2875
 
 Class weights for training dataset:
-{'fabric': 1.1223760414219597, 'ground': 1.2091468372848941, 'leather': 1.3529841172028807, 'metal': 0.8568722925939745, 'stone': 0.5839643307413064, 'wood': 0.8746563807549836}
-2873.999729990959
-Min/Max weight: 0.6590490937232971 2.196830987930298
-Oversample factor for heaviest image: 3.3333343583242088
+{'fabric': 1.1340966971713928, 'ground': 1.1902877105015872, 'leather': 1.35098788414536, 'metal': 0.8497113921330618, 'stone': 0.5827968731001469, 'wood': 0.892119442948451}
+2874.9999694228172
+Min/Max weight: 0.6591277122497559 2.1970930099487305
+Oversample factor for heaviest image: 3.333334297915562
 
------------------------ Segformer: Best Model Confusion Matrix (S4 Epoch 1) ----------------------
+----------------------- Segformer: Best Model Confusion Matrix (S3 Epoch 2) ----------------------
+
+Note: ground -> stone confusion can be beneficial
 
 True\Pred       fabric    ground   leather     metal     stone      wood
-fabric           94.8%      2.5%      2.0%      0.6%      0.0%      0.0%
-ground            0.0%     93.7%      0.0%      0.0%      6.3%      0.0%
-leather           6.5%      0.0%     82.1%      5.6%      0.1%      5.7%
-metal             0.9%      0.0%      1.3%     91.9%      3.4%      2.5%
-stone             0.1%      0.4%      2.6%      3.2%     93.3%      0.4%
-wood              5.2%      0.3%      3.2%      5.8%      0.5%     85.0%
+fabric           89.4%      0.0%      8.4%      0.3%      0.6%      1.2%
+ground            0.0%     85.1%      0.0%      0.0%     12.1%      2.8%
+leather           2.8%      0.0%     92.3%      3.8%      0.8%      0.2%
+metal             0.6%      0.0%      5.7%     89.9%      0.9%      3.0%
+stone             0.0%      0.6%      1.8%      0.4%     97.2%      0.0%
+wood              0.1%      0.0%      0.8%      3.4%      2.9%     92.9%
+
+Alternative S4 epoch 3
+True\Pred       fabric    ground   leather     metal     stone      wood
+fabric           90.0%      0.0%      8.1%      0.2%      0.6%      1.1%
+ground            0.0%     91.6%      0.0%      0.0%      5.6%      2.8%
+leather           3.0%      0.0%     92.6%      3.6%      0.4%      0.3%
+metal             1.0%      0.0%      6.8%     88.3%      0.6%      3.3%
+stone             0.0%      3.6%      1.9%      0.6%     93.9%      0.1%
+wood              0.2%      0.0%      0.8%      3.3%      2.5%     93.2%
 
 
 ----------------------- Unet-Albedo dataset info ----------------------
 Pixels per class (All):
-fabric: 675271397 pixels (10.7960%)
-ground: 661862150 pixels (10.5816%)
-leather: 351266803 pixels (5.6159%)
-metal: 826093422 pixels (13.2073%)
-stone: 2633144250 pixels (42.0978%)
-wood: 1107183904 pixels (17.7013%)
+fabric: 538478754 pixels (8.8969%)
+ground: 661862150 pixels (10.9354%)
+leather: 294813723 pixels (4.8710%)
+metal: 821458456 pixels (13.5723%)
+stone: 2628749203 pixels (43.4328%)
+wood: 1107088084 pixels (18.2916%)
 
 Samples per class with >40% ratio:
-fabric: 340 samples
+fabric: 260 samples
 ground: 268 samples
-leather: 250 samples
-metal: 410 samples
-stone: 1119 samples
+leather: 195 samples
+metal: 408 samples
+stone: 1116 samples
 wood: 526 samples
 
-Validation set size: 284
-Training set size: 2561
+Validation set size: 271
+Training set size: 2443
 
 Class weights for training dataset:
-{'fabric': 1.0710162885800543, 'ground': 1.085533051154761, 'leather': 1.488785608698755, 'metal': 0.9749781378385323, 'stone': 0.5429807186223523, 'wood': 0.8367061951055458}
-2561.000130355358
-Min/Max weight: 0.6824207305908203 2.2747364044189453
-Oversample factor for heaviest image: 3.3333342649915454
+{'fabric': 1.135688955433771, 'ground': 1.0494288681455244, 'leather': 1.5682429415555577, 'metal': 0.9314057068409406, 'stone': 0.5173477516737343, 'wood': 0.7978857763504716}
+2443.000176668167
+Min/Max weight: 0.7232559323310852 2.410853862762451
+Oversample factor for heaviest image: 3.3333343772130077
