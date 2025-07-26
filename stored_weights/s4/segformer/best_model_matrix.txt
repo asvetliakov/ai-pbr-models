@@ -1,0 +1,7 @@
+True\Pred       fabric    ground   leather     metal     stone      wood
+fabric           90.0%      0.0%      8.1%      0.2%      0.6%      1.1%
+ground            0.0%     91.6%      0.0%      0.0%      5.6%      2.8%
+leather           3.0%      0.0%     92.6%      3.6%      0.4%      0.3%
+metal             1.0%      0.0%      6.8%     88.3%      0.6%      3.3%
+stone             0.0%      3.6%      1.9%      0.6%     93.9%      0.1%
+wood              0.2%      0.0%      0.8%      3.3%      2.5%     93.2%
