@@ -15,13 +15,13 @@ Class weights = `1 / √freq(class)`; WeightedRandomSampler active in every phas
 
 ## 1. SegFormer (S)
 
-| Phase                    | Data mix (train) | **Trainables**                                    | Crop (px) | Augment † (p per sample)           | Epochs | LR & Scheduler                                | Loss                    |
-| ------------------------ | ---------------- | ------------------------------------------------- | --------- | ---------------------------------- | -----: | --------------------------------------------- | ----------------------- |
-| **S0 – Warm-up**         | 100 % Sky        | **enc + dec + heads**                             | 256       | flips, rot90 (1.0), SkyPhoto (0.6) |     30 | OneCycle LR 1e-4 → 4e-4 → 1e-5 (pct 0.15)     | 0.8 Focal CE + 0.2 Dice |
-| **S1 – Domain focus**    | 100 % Sky        | **enc (block 0 frozen) + dec + heads** (LLRD 0.9) | 512       | same                               |     15 | Cosine start 1e-4, ηₘᵢₙ 8e-6                  | same                    |
-| **S2 – Hi-res mix**      | 100 % Sky        | **enc + dec + heads** (LLRD 0.9)                  | 768       | same                               |     12 | Cosine 8e-5 → ηₘᵢₙ 8e-6                       | same                    |
-| **S3 – Full-res polish** | 100 % Sky        | **enc + dec + heads** (LLRD 0.9)                  | 1024      | _none_                             |      6 | Cosine enc 5e-6 → 2e-6, dec/head 1e-5 -> 5e-6 | same                    |
-| **S4 – Decoder final**   | 100 % Sky        | **dec-head only**                                 | 1024      | _none_                             |      6 | Cosine 1e-5                                   | same                    |
+| Phase                    | Data mix (train) | **Trainables**                                    | Crop (px) | Augment † (p per sample)           | Epochs | LR & Scheduler                               | Loss                    |
+| ------------------------ | ---------------- | ------------------------------------------------- | --------- | ---------------------------------- | -----: | -------------------------------------------- | ----------------------- |
+| **S0 – Warm-up**         | 100 % Sky        | **enc + dec + heads**                             | 256       | flips, rot90 (1.0), SkyPhoto (0.6) |     30 | OneCycle LR 1e-4 → 4e-4 → 1e-5 (pct 0.15)    | 0.8 Focal CE + 0.2 Dice |
+| **S1 – Domain focus**    | 100 % Sky        | **enc (block 0 frozen) + dec + heads** (LLRD 0.9) | 512       | same                               |     15 | Cosine start 1e-4, ηₘᵢₙ 8e-6                 | same                    |
+| **S2 – Hi-res mix**      | 100 % Sky        | **enc + dec + heads** (LLRD 0.9)                  | 768       | same                               |     12 | Cosine 8e-5 → ηₘᵢₙ 8e-6                      | same                    |
+| **S3 – Full-res polish** | 100 % Sky        | **enc + dec + heads** (LLRD 0.9)                  | 896       | same                               |      4 | Cosine enc 3e-7, dec/head 3e-6, eta_min=1e-7 | same                    |
+| **S4 – Decoder final**   | 100 % Sky        | **dec-head only**                                 | 1024      | fils, rot90                        |      6 | Cosine 1e-5                                  | same                    |
 
 ### 1.1 SegFormer Class‑balancing Strategy
 

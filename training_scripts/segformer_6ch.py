@@ -15,7 +15,7 @@ def create_segformer(
 ) -> PeftModel | SegformerForSemanticSegmentation:
     logging.set_verbosity_error()  # Suppress warnings from transformers
     model = SegformerForSemanticSegmentation.from_pretrained(
-        "nvidia/segformer-b1-finetuned-ade-512-512",
+        "nvidia/segformer-b2-finetuned-ade-512-512",
         num_labels=num_labels,  # Number of classes for segmentation
         ignore_mismatched_sizes=True,  # Ignore size mismatch for classification head
     ).to(

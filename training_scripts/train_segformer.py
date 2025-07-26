@@ -57,6 +57,13 @@ parser.add_argument(
     help="Whether to load the best validation loss from the checkpoint",
 )
 
+parser.add_argument(
+    "--lr_scale",
+    type=float,
+    default=1.0,
+    help="Scale factor for learning rate when resuming (e.g., 0.5 to halve LR)",
+)
+
 args = parser.parse_args()
 
 print(f"Training phase: {args.phase}")
@@ -108,11 +115,11 @@ skyrim_train_sampler = WeightedRandomSampler(
 )
 
 
-CROP_SIZE = 256
+CROP_SIZE = 1024  # S3 Light - between 768-1024
 
 BATCH_SIZE_VALIDATION_SKYRIM = 1
 
-SKYRIM_PHOTOMETRIC = 0.6
+SKYRIM_PHOTOMETRIC = 0.0
 
 SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0
 SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0
@@ -125,20 +132,26 @@ USE_ACCUMULATION = False
 if CROP_SIZE == 256:
     BATCH_SIZE_SKYRIM = 40
     SKYRIM_WORKERS = 16
-    SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.3
+    # SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.3
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.3
 
 if CROP_SIZE == 512:
     BATCH_SIZE_SKYRIM = 12
     SKYRIM_WORKERS = 12
-    SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.25
+    # SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.25
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.2
 
 if CROP_SIZE == 768:
     BATCH_SIZE_SKYRIM = 6
     SKYRIM_WORKERS = 6
-    SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.15
+    USE_ACCUMULATION = True
+    # SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0.15
     # SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0.1
+
+if CROP_SIZE == 896:
+    BATCH_SIZE_SKYRIM = 4
+    SKYRIM_WORKERS = 6
+    USE_ACCUMULATION = True
 
 if CROP_SIZE == 1024:
     BATCH_SIZE_SKYRIM = 3
@@ -424,7 +437,7 @@ def calculate_loss(
     key: str = "train",
 ) -> torch.Tensor:
     keep_mask = None
-    if PHASE in {"s0", "s1"} and key != "validation":
+    if PHASE in {"s0", "s1", "s2", "s3"} and key != "validation":
         keep_mask = dropout_mask(
             labels,
         )
@@ -602,7 +615,7 @@ def is_norm_param(name, module):
 
 # Training loop
 def do_train():
-    EPOCHS = 30
+    EPOCHS = 6
 
     print(
         f"Starting training for {EPOCHS} epochs, on {STEPS_PER_EPOCH_TRAIN * BATCH_SIZE} samples, validation on {len(skyrim_validation_dataset)} samples."
@@ -615,16 +628,20 @@ def do_train():
     # for p in model.parameters():
     #     p.requires_grad = False
 
+    for p in model.parameters():
+        p.requires_grad = False
+
+    # Unfreeze only last encoder block (block.3) + decoder
     # for n, p in model.named_parameters():
-    #     if "decode_head." in n:
+    #     if "decode_head." in n or ".encoder.block.3." in n:
     #         p.requires_grad = True
 
-    # for n, p in model.named_parameters():
-    #     # freeze patch embeddings 0
-    #     # if ".patch_embeddings.0" in n:
-    #     #     p.requires_grad = False
+    for n, p in model.named_parameters():
+        if "decode_head." in n:
+            p.requires_grad = True
 
-    #     # freeze all blocks in stage-0
+    # for n, p in model.named_parameters():
+    #     # freeze all blocks in stage-0, not freezing patch embeddings 0
     #     if ".encoder.block.0." in n:
     #         p.requires_grad = False
 
@@ -660,8 +677,8 @@ def do_train():
 
     skyrim_train_iter = cycle(skyrim_train_loader)
 
-    LR_DEC = 4e-4
-    LR_ENC = 4e-4
+    LR_DEC = 1e-5
+    LR_ENC = 3e-7
     # WD = 1e-2
 
     # --- map every parameter to its encoder depth (None = decoder / head) ---
@@ -720,22 +737,8 @@ def do_train():
         for (lr, wd), params in param_groups.items()
     ]
 
-    # head_params = [
-    #     p
-    #     for n, p in model.named_parameters()
-    #     if "decode_head." in n and p.requires_grad
-    # ]
-
-    # lora_params = [
-    #     p for n, p in model.named_parameters() if "lora_" in n and p.requires_grad
-    # ]
-
-    # trainable = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        # model.parameters(),  # type: ignore
         optimizer_groups,
-        # lr=LR,
-        # weight_decay=WD,
         betas=(0.9, 0.999),
         eps=1e-8,
     )
@@ -749,11 +752,28 @@ def do_train():
     )
 
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    #     optimizer, T_max=effective_scheduler_steps, eta_min=1e-6
+    #     optimizer, T_max=EPOCHS * effective_scheduler_steps, eta_min=2e-6
     # )
 
-    # 3-stage scheduler: warmup -> cosine -> aggressive decay
-    # Stage 1: 1 epoch warm-up to the base LR
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=0.1,
+        end_factor=1.0,
+        total_iters=effective_scheduler_steps // 2,  # Half epoch warmup
+    )
+
+    cosine_stage1 = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=int((EPOCHS - 0.5) * effective_scheduler_steps), eta_min=1e-7
+    )
+
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup, cosine_stage1],
+        milestones=[
+            effective_scheduler_steps // 2
+        ],  # After half epoch switch to cosine
+    )
+
     # warmup = torch.optim.lr_scheduler.LinearLR(
     #     optimizer,
     #     start_factor=0.1,
@@ -761,9 +781,8 @@ def do_train():
     #     total_iters=effective_scheduler_steps,
     # )
 
-    # Stage 2: 1 epoch standard cosine decay
     # cosine_stage1 = torch.optim.lr_scheduler.CosineAnnealingLR(
-    #     optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=2e-6
+    #     optimizer, T_max=(EPOCHS - 1) * effective_scheduler_steps, eta_min=1e-6
     # )
 
     # Stage 3: Aggressive cosine decay from epoch 3 onwards (0.3x current LR as max)
@@ -780,19 +799,27 @@ def do_train():
     #         # 2 * effective_scheduler_steps,  # After epoch 2 switch to aggressive decay
     #     ],
     # )
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=LR_DEC,  # 4e-4 according to README
-        total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
-        # 15% warm-up 85% cooldown per README
-        pct_start=0.15,
-        div_factor=4.0,  # start LR = max_lr/4 = 1e-4
-        # div_factor=10.0,  # start LR = max_lr/10 = 4e-5
-        final_div_factor=40.0,  # End LR = max_lr/final_div = 1e-5
-    )
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer,
+    #     max_lr=LR_DEC,  # 4e-4 according to README
+    #     total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
+    #     # 15% warm-up 85% cooldown per README
+    #     pct_start=0.15,
+    #     div_factor=4.0,  # start LR = max_lr/4 = 1e-4
+    #     # div_factor=10.0,  # start LR = max_lr/10 = 4e-5
+    #     final_div_factor=40.0,  # End LR = max_lr/final_div = 1e-5
+    # )
     if best_model_checkpoint is not None and resume_training:
         print("Loading scheduler state from checkpoint.")
         scheduler.load_state_dict(best_model_checkpoint["scheduler_state_dict"])
+
+        # Manual LR reduction after resuming
+        if args.lr_scale != 1.0:
+            print(f"Manually scaling learning rate by factor of {args.lr_scale}")
+            for param_group in optimizer.param_groups:
+                old_lr = param_group["lr"]
+                param_group["lr"] = old_lr * args.lr_scale
+                print(f"LR changed from {old_lr:.2e} to {param_group['lr']:.2e}")
 
     scaler = GradScaler(device.type)  # AMP scaler for mixed precision
     if best_model_checkpoint is not None and resume_training:
@@ -813,7 +840,7 @@ def do_train():
             )
             best_val_loss = float("inf")
 
-    patience = 4
+    patience = 6
     no_improvement_count = 0
 
     output_dir = Path(f"./weights/{PHASE}/segformer")
@@ -963,10 +990,8 @@ def do_train():
             {
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
-                # "base_model_state_dict": (
-                #     model.base_model.state_dict() if model.base_model else None
-                # ),
-                # "lora_state_dict": (model.state_dict() if model.base_model else None),
+                # "base_model_state_dict": model.base_model.state_dict(),
+                # "lora_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "scaler_state_dict": scaler.state_dict(),
@@ -986,12 +1011,8 @@ def do_train():
                 {
                     "epoch": epoch + 1,
                     "model_state_dict": model.state_dict(),
-                    # "base_model_state_dict": (
-                    #     model.base_model.state_dict() if model.base_model else None
-                    # ),
-                    # "lora_state_dict": (
-                    #     model.state_dict() if model.base_model else None
-                    # ),
+                    # "base_model_state_dict": model.base_model.state_dict(),
+                    # "lora_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "scaler_state_dict": scaler.state_dict(),
