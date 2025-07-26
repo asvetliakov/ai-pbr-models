@@ -21,12 +21,9 @@ from transformers.utils.constants import (
     IMAGENET_STANDARD_MEAN,
     IMAGENET_STANDARD_STD,
 )
-from train_dataset import SimpleImageDataset
 from skyrim_dataset import SkyrimDataset, mask_to_tensor
 from augmentations import (
     get_random_crop,
-    make_full_image_mask,
-    selective_aug,
 )
 from skyrim_photometric_aug import SkyrimPhotometric
 from class_materials import CLASS_LIST
@@ -111,7 +108,7 @@ skyrim_train_sampler = WeightedRandomSampler(
 )
 
 
-CROP_SIZE = 1024
+CROP_SIZE = 256
 
 BATCH_SIZE_VALIDATION_SKYRIM = 1
 
@@ -219,7 +216,7 @@ def skyrim_transform_train_fn(example):
         crop_data = skyrim_data_file[f"leather_crops_{CROP_SIZE}"]
         # crop_data = skyrim_data_file[f"leather_crops_768"]
         (sample_name, x, y) = random.choice(crop_data)
-        # specific_crop_pos = (x, y)
+        specific_crop_pos = (x, y)
         example = skyrim_train_dataset.get_specific_sample_for_relative_mask(
             sample_name
         )
@@ -229,9 +226,9 @@ def skyrim_transform_train_fn(example):
     mask = example["mask"]
 
     used_diffuse = False
-    if random.random() < 0.4:
-        albedo = example["diffuse"]
-        used_diffuse = True
+    # if random.random() < 0.3:
+    #     albedo = example["diffuse"]
+    #     used_diffuse = True
 
     crop_result = get_random_crop(
         albedo=albedo,  # type: ignore
@@ -425,7 +422,6 @@ def calculate_loss(
     labels: torch.Tensor,
     epoch_data: dict,
     key: str = "train",
-    dataset: str = "matsynth",
 ) -> torch.Tensor:
     keep_mask = None
     if PHASE in {"s0", "s1"} and key != "validation":
@@ -445,14 +441,14 @@ def calculate_loss(
             average="none",  # Calculate IoU for each class separately
         )
         # Accumulate Jaccard index for each class as scalars, but only for classes present in batch
-        if epoch_data[key][dataset].get("jaccard_sum") is None:
-            epoch_data[key][dataset]["jaccard_sum"] = [0.0] * len(CLASS_LIST)
-        if epoch_data[key][dataset].get("jaccard_batch_count") is None:
-            epoch_data[key][dataset]["jaccard_batch_count"] = [0] * len(CLASS_LIST)
+        if epoch_data[key].get("jaccard_sum") is None:
+            epoch_data[key]["jaccard_sum"] = [0.0] * len(CLASS_LIST)
+        if epoch_data[key].get("jaccard_batch_count") is None:
+            epoch_data[key]["jaccard_batch_count"] = [0] * len(CLASS_LIST)
 
         # Initialize confusion matrix accumulator
-        if epoch_data[key][dataset].get("confusion_matrix") is None:
-            epoch_data[key][dataset]["confusion_matrix"] = torch.zeros(
+        if epoch_data[key].get("confusion_matrix") is None:
+            epoch_data[key]["confusion_matrix"] = torch.zeros(
                 len(CLASS_LIST), len(CLASS_LIST), dtype=torch.long
             )
 
@@ -468,41 +464,40 @@ def calculate_loss(
                 labels=list(range(len(CLASS_LIST))),
                 sample_weight=None,
             )
-            epoch_data[key][dataset]["confusion_matrix"] += torch.from_numpy(batch_cm)
+            epoch_data[key]["confusion_matrix"] += torch.from_numpy(batch_cm)
 
         # Check which classes are present in this batch
         for class_id in range(len(CLASS_LIST)):
             class_present = (flat_labels == class_id).any().item()
             if class_present:  # Only accumulate IoU for classes present in this batch
-                epoch_data[key][dataset]["jaccard_sum"][class_id] += (
+                epoch_data[key]["jaccard_sum"][class_id] += (
                     jaccard_index[class_id].float().item()
                 )
-                epoch_data[key][dataset]["jaccard_batch_count"][class_id] += 1
+                epoch_data[key]["jaccard_batch_count"][class_id] += 1
 
     total_loss = torch.tensor(0.0, device=logits.device)
 
-    if dataset == "skyrim":
-        if epoch_data[key][dataset].get("focal_loss") is None:
-            epoch_data[key][dataset]["focal_loss"] = 0.0
+    if epoch_data[key].get("focal_loss") is None:
+        epoch_data[key]["focal_loss"] = 0.0
 
-        if epoch_data[key][dataset].get("dice") is None:
-            epoch_data[key][dataset]["dice"] = 0.0
+    if epoch_data[key].get("dice") is None:
+        epoch_data[key]["dice"] = 0.0
 
-        focal_loss = focal_ce(logits, labels, keep_mask=keep_mask)
-        dice = dice_loss(
-            logits.softmax(dim=1),  # Convert logits to probabilities
-            labels,
-            keep_mask=keep_mask,  # Apply keep_mask if it exists
-        )
+    focal_loss = focal_ce(logits, labels, keep_mask=keep_mask)
+    dice = dice_loss(
+        logits.softmax(dim=1),  # Convert logits to probabilities
+        labels,
+        keep_mask=keep_mask,  # Apply keep_mask if it exists
+    )
 
-        epoch_data[key][dataset]["focal_loss"] += focal_loss.item()
-        epoch_data[key][dataset]["dice"] += dice.item()
+    epoch_data[key]["focal_loss"] += focal_loss.item()
+    epoch_data[key]["dice"] += dice.item()
 
-        # New weighting: Focal loss is the main component, Dice loss regularizes it.
-        total_loss = 0.8 * focal_loss + 0.2 * dice
+    # New weighting: Focal loss is the main component, Dice loss regularizes it.
+    total_loss = 0.8 * focal_loss + 0.2 * dice
 
-    epoch_data[key][dataset]["total_loss"] += total_loss.item()
-    epoch_data[key][dataset]["batch_count"] += 1
+    epoch_data[key]["total_loss"] += total_loss.item()
+    epoch_data[key]["batch_count"] += 1
 
     return total_loss
 
@@ -510,61 +505,46 @@ def calculate_loss(
 def calculate_final_statistics(
     epoch_data: dict,
     key: str = "train",
-    dataset: str = "matsynth",
 ):
     if key == "validation":
-        epoch_data[key][dataset]["per_class_iou"] = {}
+        epoch_data[key]["per_class_iou"] = {}
 
         # Calculate average Jaccard index over batches where each class was present
         for class_id, class_name in enumerate(CLASS_LIST):
-            class_batch_count = epoch_data[key][dataset]["jaccard_batch_count"][
-                class_id
-            ]
+            class_batch_count = epoch_data[key]["jaccard_batch_count"][class_id]
             if class_batch_count > 0:
-                avg_iou = (
-                    epoch_data[key][dataset]["jaccard_sum"][class_id]
-                    / class_batch_count
-                )
+                avg_iou = epoch_data[key]["jaccard_sum"][class_id] / class_batch_count
             else:
                 avg_iou = 0.0  # Class never appeared in any batch
-            epoch_data[key][dataset]["per_class_iou"][class_name] = avg_iou
+            epoch_data[key]["per_class_iou"][class_name] = avg_iou
 
         # Calculate mean IoU across all classes (only for classes that appeared)
         valid_ious = []
         for class_id in range(len(CLASS_LIST)):
-            class_batch_count = epoch_data[key][dataset]["jaccard_batch_count"][
-                class_id
-            ]
+            class_batch_count = epoch_data[key]["jaccard_batch_count"][class_id]
             if class_batch_count > 0:
-                avg_iou = (
-                    epoch_data[key][dataset]["jaccard_sum"][class_id]
-                    / class_batch_count
-                )
+                avg_iou = epoch_data[key]["jaccard_sum"][class_id] / class_batch_count
                 valid_ious.append(avg_iou)
 
         if valid_ious:
-            epoch_data[key][dataset]["mean_iou"] = sum(valid_ious) / len(valid_ious)
+            epoch_data[key]["mean_iou"] = sum(valid_ious) / len(valid_ious)
         else:
-            epoch_data[key][dataset]["mean_iou"] = 0.0
+            epoch_data[key]["mean_iou"] = 0.0
 
         # Clean up temporary accumulators
-        del epoch_data[key][dataset]["jaccard_sum"]
-        del epoch_data[key][dataset]["jaccard_batch_count"]
+        del epoch_data[key]["jaccard_sum"]
+        del epoch_data[key]["jaccard_batch_count"]
 
-    if dataset == "skyrim":
-        epoch_data[key][dataset]["dice"] = (
-            epoch_data[key][dataset]["dice"] / epoch_data[key][dataset]["batch_count"]
-        )
-        epoch_data[key][dataset]["focal_loss"] = (
-            epoch_data[key][dataset]["focal_loss"]
-            / epoch_data[key][dataset]["batch_count"]
-        )
+    epoch_data[key]["dice"] = epoch_data[key]["dice"] / epoch_data[key]["batch_count"]
+    epoch_data[key]["focal_loss"] = (
+        epoch_data[key]["focal_loss"] / epoch_data[key]["batch_count"]
+    )
 
-    epoch_data[key][dataset]["total_loss"] /= epoch_data[key][dataset]["batch_count"]
+    epoch_data[key]["total_loss"] /= epoch_data[key]["batch_count"]
 
 
 def print_confusion_matrix(epoch_data: dict):
-    cm = epoch_data["validation"]["skyrim"]["confusion_matrix"]
+    cm = epoch_data["validation"]["confusion_matrix"]
 
     # Calculate percentages (row-wise normalization)
     cm_percent = cm.float()
@@ -585,7 +565,7 @@ def print_confusion_matrix(epoch_data: dict):
             row += f"{cm_percent[i, j].item():>9.1f}%"
         print(row)
     print()  # Empty line after table
-    del epoch_data["validation"]["skyrim"]["confusion_matrix"]
+    del epoch_data["validation"]["confusion_matrix"]
 
 
 def cycle(dl: DataLoader):
@@ -622,7 +602,7 @@ def is_norm_param(name, module):
 
 # Training loop
 def do_train():
-    EPOCHS = 6
+    EPOCHS = 30
 
     print(
         f"Starting training for {EPOCHS} epochs, on {STEPS_PER_EPOCH_TRAIN * BATCH_SIZE} samples, validation on {len(skyrim_validation_dataset)} samples."
@@ -632,12 +612,12 @@ def do_train():
     # for n, p in model.named_parameters():
     #     print(f"Parameter: {n}")
 
-    for p in model.parameters():
-        p.requires_grad = False
+    # for p in model.parameters():
+    #     p.requires_grad = False
 
-    for n, p in model.named_parameters():
-        if "decode_head." in n:
-            p.requires_grad = True
+    # for n, p in model.named_parameters():
+    #     if "decode_head." in n:
+    #         p.requires_grad = True
 
     # for n, p in model.named_parameters():
     #     # freeze patch embeddings 0
@@ -657,26 +637,6 @@ def do_train():
     # for n, p in model.named_parameters():
     #     if p.requires_grad:
     #         print(f"Trainable parameter: {n}")
-
-    # matsynth_train_loader = DataLoader(
-    #     matsynth_train_dataset,  # type: ignore
-    #     batch_size=BATCH_SIZE_MATSYNTH,
-    #     sampler=mat_train_sampler,
-    #     num_workers=MATSYNTH_WORKERS,
-    #     prefetch_factor=2,
-    #     shuffle=False,
-    #     pin_memory=True,
-    #     persistent_workers=True,
-    # )
-
-    # matsynth_validation_loader = DataLoader(
-    #     matsynth_validation_dataset,  # type: ignore
-    #     batch_size=BATCH_SIZE_VALIDATION_MATSYNTH,
-    #     num_workers=2,
-    #     shuffle=False,
-    #     pin_memory=True,
-    #     persistent_workers=True,
-    # )
 
     skyrim_train_loader = DataLoader(
         skyrim_train_dataset,
@@ -698,11 +658,10 @@ def do_train():
         persistent_workers=True,
     )
 
-    # matsynth_train_iter = cycle(matsynth_train_loader)
     skyrim_train_iter = cycle(skyrim_train_loader)
 
-    LR_DEC = 1e-5
-    LR_ENC = 5e-6
+    LR_DEC = 4e-4
+    LR_ENC = 4e-4
     # WD = 1e-2
 
     # --- map every parameter to its encoder depth (None = decoder / head) ---
@@ -789,9 +748,9 @@ def do_train():
         int(STEPS_PER_EPOCH_TRAIN / 2) if USE_ACCUMULATION else STEPS_PER_EPOCH_TRAIN
     )
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=effective_scheduler_steps, eta_min=1e-6
-    )
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #     optimizer, T_max=effective_scheduler_steps, eta_min=1e-6
+    # )
 
     # 3-stage scheduler: warmup -> cosine -> aggressive decay
     # Stage 1: 1 epoch warm-up to the base LR
@@ -821,16 +780,16 @@ def do_train():
     #         # 2 * effective_scheduler_steps,  # After epoch 2 switch to aggressive decay
     #     ],
     # )
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #     optimizer,
-    #     max_lr=LR_DEC,  # 4e-4 according to README
-    #     total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
-    #     # 15% warm-up 85% cooldown per README
-    #     pct_start=0.15,
-    #     # div_factor=4.0,  # start LR = max_lr/4 = 1e-4
-    #     div_factor=10.0,  # start LR = max_lr/10 = 4e-5
-    #     final_div_factor=40.0,  # End LR = max_lr/final_div = 1e-5
-    # )
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=LR_DEC,  # 4e-4 according to README
+        total_steps=EPOCHS * STEPS_PER_EPOCH_TRAIN,
+        # 15% warm-up 85% cooldown per README
+        pct_start=0.15,
+        div_factor=4.0,  # start LR = max_lr/4 = 1e-4
+        # div_factor=10.0,  # start LR = max_lr/10 = 4e-5
+        final_div_factor=40.0,  # End LR = max_lr/final_div = 1e-5
+    )
     if best_model_checkpoint is not None and resume_training:
         print("Loading scheduler state from checkpoint.")
         scheduler.load_state_dict(best_model_checkpoint["scheduler_state_dict"])
@@ -844,7 +803,7 @@ def do_train():
     if best_model_checkpoint is not None and args.load_best_loss and resume_training:
         # Use the correct key from epoch_data structure
         try:
-            best_val_loss = best_model_checkpoint["epoch_data"]["validation"]["skyrim"][
+            best_val_loss = best_model_checkpoint["epoch_data"]["validation"][
                 "total_loss"
             ]
             print(f"Loaded best validation loss: {best_val_loss}")
@@ -871,24 +830,12 @@ def do_train():
         epoch_data = {
             "epoch": epoch + 1,
             "train": {
-                "matsynth": {
-                    "total_loss": 0.0,
-                    "batch_count": 0,
-                },
-                "skyrim": {
-                    "total_loss": 0.0,
-                    "batch_count": 0,
-                },
+                "total_loss": 0.0,
+                "batch_count": 0,
             },
             "validation": {
-                "matsynth": {
-                    "total_loss": 0.0,
-                    "batch_count": 0,
-                },
-                "skyrim": {
-                    "total_loss": 0.0,
-                    "batch_count": 0,
-                },
+                "total_loss": 0.0,
+                "batch_count": 0,
             },
         }
 
@@ -931,7 +878,6 @@ def do_train():
                     labels_gt,
                     epoch_data,
                     key="train",
-                    dataset="skyrim",
                 )
                 if torch.isnan(skyrim_loss):
                     raise ValueError("Loss is NaN")
@@ -967,7 +913,7 @@ def do_train():
                     # Step per effective batch
                     scheduler.step()
 
-        calculate_final_statistics(epoch_data, key="train", dataset="skyrim")
+        calculate_final_statistics(epoch_data, key="train")
 
         model.eval()
         with torch.no_grad():
@@ -997,16 +943,15 @@ def do_train():
                         labels,
                         epoch_data,
                         key="validation",
-                        dataset="skyrim",
                     )
 
                     if torch.isnan(loss):
                         raise ValueError("Loss is NaN")
 
-            calculate_final_statistics(epoch_data, key="validation", dataset="skyrim")
+            calculate_final_statistics(epoch_data, key="validation")
 
         # use only skyrim validation loss for early stopping
-        epoch_val_loss = epoch_data["validation"]["skyrim"]["total_loss"]
+        epoch_val_loss = epoch_data["validation"]["total_loss"]
 
         # scheduler.step()
 
