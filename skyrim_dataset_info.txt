@@ -126,33 +126,33 @@ Validation set size: 250
 Training set size: 2256
 
 Class weights for training dataset:
-{'fabric': 1.144883274956107, 'ground': 0.9769040783800758, 'leather': 1.760962304703703, 'metal': 0.8892416868562821, 'stone': 0.4859172365844548, 'wood': 0.7420914185193779}
-2256.000212430954
-Min/Max weight: 0.757355809211731 2.5245201587677
-Oversample factor for heaviest image: 3.33333438267974
+{'fabric': 1.158714216192548, 'ground': 0.9498754064508199, 'leather': 1.7475200958398676, 'metal': 0.9032168409927337, 'stone': 0.49087940342016967, 'wood': 0.7497940371038616}
+2256.0002469420433
+Min/Max weight: 0.7541521787643433 2.513841390609741
+Oversample factor for heaviest image: 3.3333343871373526
 
 ----------------------- Unet-Maps (except parallax) dataset info ----------------------
 Pixels per class (All):
-fabric: 949110070 pixels (11.8552%)
-ground: 668381776 pixels (8.3487%)
-leather: 727010977 pixels (9.0810%)
-metal: 1684118953 pixels (21.0361%)
-stone: 2713622293 pixels (33.8954%)
-wood: 1263617256 pixels (15.7837%)
+fabric: 949110070 pixels (11.8692%)
+ground: 668381776 pixels (8.3585%)
+leather: 727010977 pixels (9.0917%)
+metal: 1684118947 pixels (21.0609%)
+stone: 2704185115 pixels (33.8174%)
+wood: 1263617256 pixels (15.8023%)
 
 Samples per class with >40% ratio:
 fabric: 383 samples
 ground: 269 samples
 leather: 364 samples
 metal: 752 samples
-stone: 1159 samples
+stone: 1157 samples
 wood: 558 samples
 
-Validation set size: 336
-Training set size: 3026
+Validation set size: 335
+Training set size: 3024
 
 Class weights for training dataset:
-{'fabric': 1.0838312780734976, 'ground': 1.3024449437117986, 'leather': 1.247075788676818, 'metal': 0.8092630788514052, 'stone': 0.6308490467882556, 'wood': 0.9265358638982252}
-3026.000090241432
-Min/Max weight: 0.655806303024292 2.1860218048095703
-Oversample factor for heaviest image: 3.3333345451676712
+{'fabric': 1.1013044313425115, 'ground': 1.283504947678259, 'leather': 1.2443614518998476, 'metal': 0.8067119157388923, 'stone': 0.639911925454155, 'wood': 0.9242053278863349}
+3023.9998803138733
+Min/Max weight: 0.6558979153633118 2.1863272190093994
+Oversample factor for heaviest image: 3.3333346055816624

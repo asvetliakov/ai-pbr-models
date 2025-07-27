@@ -147,17 +147,19 @@ if CROP_SIZE == 256:
 
 if CROP_SIZE == 512:
     BATCH_SIZE = 4
-    WORKERS = 4
+    WORKERS = 8
     USE_ACCUMULATION = True
+    ACCUM_STEPS = 2
 
 if CROP_SIZE == 768:
     BATCH_SIZE = 2
     WORKERS = 4
     USE_ACCUMULATION = True
+    ACCUM_STEPS = 2
 
 if CROP_SIZE == 1024:
     BATCH_SIZE = 1
-    WORKERS = 2
+    WORKERS = 4
     USE_ACCUMULATION = True
     ACCUM_STEPS = 4
 
@@ -306,7 +308,9 @@ def transform_train_fn(example):
     albedo_orig = TF.to_tensor(albedo_orig)
 
     if SKYRIM_PHOTOMETRIC > 0.0:
-        skyrim_photometric = SkyrimPhotometric(p_aug=SKYRIM_PHOTOMETRIC)
+        skyrim_photometric = SkyrimPhotometric(
+            p_aug=SKYRIM_PHOTOMETRIC, ao_enabled=False
+        )
         diffuse = skyrim_photometric(diffuse)
 
     normal = TF.to_tensor(normal)  # type: ignore
@@ -987,7 +991,7 @@ skyrim_validation_dataset.set_transform(transform_val_fn)
 
 # Training loop
 def do_train():
-    EPOCHS = 9
+    EPOCHS = 6
 
     print(
         f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, validation on {MIN_SAMPLES_VALIDATION} samples."
@@ -1030,11 +1034,9 @@ def do_train():
 
     skyrim_train_iter = cycle(skyrim_train_loader)
 
-    skyrim_validation_iter = cycle(skyrim_validation_loader)
-
     WD = 1e-2
-    base_enc_lr = 1e-4
-    base_dec_lr = 2e-4
+    base_enc_lr = 8e-5
+    base_dec_lr = 1e-4
     # base_enc_lr = 5e-5
     # base_dec_lr = 2e-4
 
@@ -1049,7 +1051,7 @@ def do_train():
 
     n_blocks = len(depth_map)
     param_groups = []
-    gamma = 0.9
+    # gamma = 0.9
     # for depth, prefixes in depth_map.items():
     #     lr = base_enc_lr * (gamma ** (n_blocks - depth - 1))
     #     params = [
@@ -1091,7 +1093,7 @@ def do_train():
     param_groups.append({"params": film_params, "lr": base_dec_lr, "weight_decay": 0.0})
 
     head_params = [
-        p for n, p in unet_maps.named_parameters() if "out." in n and p.requires_grad
+        p for n, p in unet_maps.named_parameters() if "head." in n and p.requires_grad
     ]
     param_groups.append({"params": head_params, "lr": base_dec_lr, "weight_decay": WD})
     # for n, p in unet_maps.named_parameters():
@@ -1108,7 +1110,9 @@ def do_train():
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     effective_steps_per_epoch = (
-        int(STEPS_PER_EPOCH_TRAIN / 2) if USE_ACCUMULATION else STEPS_PER_EPOCH_TRAIN
+        int(STEPS_PER_EPOCH_TRAIN / ACCUM_STEPS)
+        if USE_ACCUMULATION
+        else STEPS_PER_EPOCH_TRAIN
     )
 
     # 1 epoch warm-up to the base LR
@@ -1123,7 +1127,7 @@ def do_train():
         optimizer,
         T_max=(EPOCHS - 1) * effective_steps_per_epoch,
         # eta_min=base_enc_lr * 0.05,
-        eta_min=base_enc_lr * 0.05,
+        eta_min=base_enc_lr * 0.1,
         # eta_min=base_dec_lr * 0.1,
     )
 
@@ -1221,25 +1225,25 @@ def do_train():
                         .detach()
                     )
                     # Get segformer mask
-                    segformer_pred = segformer(
-                        albedo_and_normal_segformer
-                    ).logits.detach()
+                    # segformer_pred = segformer(
+                    #     albedo_and_normal_segformer
+                    # ).logits.detach()
 
-                    segformer_pred: torch.Tensor = torch.nn.functional.interpolate(
-                        segformer_pred,
-                        size=albedo_and_normal_segformer.shape[2:],
-                        mode="bilinear",
-                        align_corners=False,
-                    )
+                    # segformer_pred: torch.Tensor = torch.nn.functional.interpolate(
+                    #     segformer_pred,
+                    #     size=albedo_and_normal_segformer.shape[2:],
+                    #     mode="bilinear",
+                    #     align_corners=False,
+                    # )
 
-                    predicted_albedo = unet_albedo(
-                        diffuse_and_normal, seg_feats
-                    ).detach()
+                    # predicted_albedo = unet_albedo(
+                    #     diffuse_and_normal, seg_feats
+                    # ).detach()
 
-            predicted_albedo = TF.normalize(
-                predicted_albedo, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
-            )
-            predicted_albedo = predicted_albedo.to(device, non_blocking=True)
+            # predicted_albedo = TF.normalize(
+            #     predicted_albedo, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
+            # )
+            # predicted_albedo = predicted_albedo.to(device, non_blocking=True)
 
             if UNET_MAP == "parallax" or UNET_MAP == "ao":
                 curvature = mean_curvature_map(normal)
@@ -1252,40 +1256,40 @@ def do_train():
                     dim=1,
                 )
 
-            if UNET_MAP == "roughness":
-                input = torch.cat(
-                    [
-                        predicted_albedo,
-                        normal,
-                    ],
-                    dim=1,
-                )
+            # if UNET_MAP == "roughness":
+            # input = torch.cat(
+            #     [
+            #         predicted_albedo,
+            #         normal,
+            #     ],
+            #     dim=1,
+            # )
 
-            if UNET_MAP == "metallic":
-                # seg_mask = F.one_hot(
-                #     segformer_pred.argmax(1),
-                #     num_classes=len(CLASS_LIST),
-                # )  # (B,H,W,K)
-                # seg_mask = seg_mask.permute(0, 3, 1, 2).float()  # → (B,K,H,W)
-                seg_probs = F.softmax(segformer_pred, dim=1)
+            # if UNET_MAP == "metallic":
+            #     # seg_mask = F.one_hot(
+            #     #     segformer_pred.argmax(1),
+            #     #     num_classes=len(CLASS_LIST),
+            #     # )  # (B,H,W,K)
+            #     # seg_mask = seg_mask.permute(0, 3, 1, 2).float()  # → (B,K,H,W)
+            #     seg_probs = F.softmax(segformer_pred, dim=1)
 
-                thresh = 0.2
-                # Zero out any class‐probabilities below the threshold
-                probs_thresh = torch.where(
-                    seg_probs < thresh, torch.zeros_like(seg_probs), seg_probs
-                )
+            #     thresh = 0.2
+            #     # Zero out any class‐probabilities below the threshold
+            #     probs_thresh = torch.where(
+            #         seg_probs < thresh, torch.zeros_like(seg_probs), seg_probs
+            #     )
 
-                # Renormalize so the channels still sum to 1
-                sum_probs = probs_thresh.sum(dim=1, keepdim=True).clamp_min(1e-6)
-                probs_renorm = probs_thresh / sum_probs
+            #     # Renormalize so the channels still sum to 1
+            #     sum_probs = probs_thresh.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            #     probs_renorm = probs_thresh / sum_probs
 
-                input = torch.cat(
-                    [
-                        predicted_albedo,
-                        probs_renorm,
-                    ],
-                    dim=1,
-                )
+            #     input = torch.cat(
+            #         [
+            #             predicted_albedo,
+            #             probs_renorm,
+            #         ],
+            #         dim=1,
+            #     )
 
             with autocast(device_type=device.type):
                 # Get predicted map from UNet
@@ -1331,17 +1335,16 @@ def do_train():
 
         unet_maps.eval()
         with torch.no_grad():
-            bar = tqdm(
-                range(STEPS_PER_EPOCH_VALIDATION),
-                desc=f"Epoch {epoch + 1}/{EPOCHS} - Validation",
-                unit="batch",
-            )
 
             num_samples_saved = 0
 
-            for _ in bar:
-                skyrim_batch = next(skyrim_validation_iter)
-
+            for _, skyrim_batch in enumerate(
+                tqdm(
+                    skyrim_validation_loader,
+                    desc=f"Epoch {epoch + 1}/{EPOCHS} - Validation",
+                    unit="batch",
+                )
+            ):
                 diffuse_and_normal = skyrim_batch["diffuse_and_normal"]
                 albedo_and_normal_segformer = skyrim_batch[
                     "albedo_and_normal_segformer"
@@ -1377,29 +1380,29 @@ def do_train():
                         .detach()
                     )
 
-                    # Get segformer mask
-                    segformer_pred = segformer(
-                        albedo_and_normal_segformer
-                    ).logits.detach()
+                    # # Get segformer mask
+                    # segformer_pred = segformer(
+                    #     albedo_and_normal_segformer
+                    # ).logits.detach()
 
-                    segformer_pred: torch.Tensor = torch.nn.functional.interpolate(
-                        segformer_pred,
-                        size=albedo_and_normal_segformer.shape[2:],
-                        mode="bilinear",
-                        align_corners=False,
-                    )
+                    # segformer_pred: torch.Tensor = torch.nn.functional.interpolate(
+                    #     segformer_pred,
+                    #     size=albedo_and_normal_segformer.shape[2:],
+                    #     mode="bilinear",
+                    #     align_corners=False,
+                    # )
 
-                    predicted_albedo = unet_albedo(
-                        diffuse_and_normal, seg_feats
-                    ).detach()
+                    # predicted_albedo = unet_albedo(
+                    #     diffuse_and_normal, seg_feats
+                    # ).detach()
 
                 # predicted_albedo_orig = predicted_albedo
-                predicted_albedo = TF.normalize(
-                    predicted_albedo,
-                    mean=IMAGENET_STANDARD_MEAN,
-                    std=IMAGENET_STANDARD_STD,
-                )
-                predicted_albedo = predicted_albedo.to(device, non_blocking=True)
+                # predicted_albedo = TF.normalize(
+                #     predicted_albedo,
+                #     mean=IMAGENET_STANDARD_MEAN,
+                #     std=IMAGENET_STANDARD_STD,
+                # )
+                # predicted_albedo = predicted_albedo.to(device, non_blocking=True)
 
                 if UNET_MAP == "parallax" or UNET_MAP == "ao":
                     curvature = mean_curvature_map(normal)
@@ -1411,40 +1414,40 @@ def do_train():
                         ],
                         dim=1,
                     )
-                if UNET_MAP == "roughness":
-                    input = torch.cat(
-                        [
-                            predicted_albedo,
-                            normal,
-                        ],
-                        dim=1,
-                    )
+                # if UNET_MAP == "roughness":
+                #     input = torch.cat(
+                #         [
+                #             predicted_albedo,
+                #             normal,
+                #         ],
+                #         dim=1,
+                #     )
 
-                if UNET_MAP == "metallic":
-                    # seg_mask = F.one_hot(
-                    #     segformer_pred.argmax(1),
-                    #     num_classes=len(CLASS_LIST),
-                    # )  # (B,H,W,K)
-                    # seg_mask = seg_mask.permute(0, 3, 1, 2).float()  # → (B,K,H,W)
-                    seg_probs = F.softmax(segformer_pred, dim=1)
+                # if UNET_MAP == "metallic":
+                #     # seg_mask = F.one_hot(
+                #     #     segformer_pred.argmax(1),
+                #     #     num_classes=len(CLASS_LIST),
+                #     # )  # (B,H,W,K)
+                #     # seg_mask = seg_mask.permute(0, 3, 1, 2).float()  # → (B,K,H,W)
+                #     seg_probs = F.softmax(segformer_pred, dim=1)
 
-                    thresh = 0.2
-                    # Zero out any class‐probabilities below the threshold
-                    probs_thresh = torch.where(
-                        seg_probs < thresh, torch.zeros_like(seg_probs), seg_probs
-                    )
+                #     thresh = 0.2
+                #     # Zero out any class‐probabilities below the threshold
+                #     probs_thresh = torch.where(
+                #         seg_probs < thresh, torch.zeros_like(seg_probs), seg_probs
+                #     )
 
-                    # Renormalize so the channels still sum to 1
-                    sum_probs = probs_thresh.sum(dim=1, keepdim=True).clamp_min(1e-6)
-                    probs_renorm = probs_thresh / sum_probs
+                #     # Renormalize so the channels still sum to 1
+                #     sum_probs = probs_thresh.sum(dim=1, keepdim=True).clamp_min(1e-6)
+                #     probs_renorm = probs_thresh / sum_probs
 
-                    input = torch.cat(
-                        [
-                            predicted_albedo,
-                            probs_renorm,
-                        ],
-                        dim=1,
-                    )
+                #     input = torch.cat(
+                #         [
+                #             predicted_albedo,
+                #             probs_renorm,
+                #         ],
+                #         dim=1,
+                #     )
 
                 with autocast(device_type=device.type):
                     # Get predicted map from UNet
