@@ -61,7 +61,7 @@ class SkyrimDataset(Dataset):
                 relative_path not in train_data["train"]
                 and relative_path not in train_data["val"]
             ):
-                print(f"Skipping sample {relative_path} not in train or val set")
+                # print(f"Skipping sample {relative_path} not in train or val set")
                 continue
 
             dataset = (
