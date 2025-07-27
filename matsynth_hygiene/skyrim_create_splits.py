@@ -132,7 +132,11 @@ def main():
 
             total_pixels_all += total
 
-    mask_paths = [str(p.relative_to(INPUT_DIR)) for p in masks]
+    mask_paths = [
+        str(p.relative_to(INPUT_DIR))
+        for p in masks
+        if sample_stats[str(p.relative_to(INPUT_DIR))]["total"] > 0
+    ]
     random.shuffle(mask_paths)
 
     print("Pixels per class (All):")
