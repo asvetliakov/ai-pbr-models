@@ -9,7 +9,7 @@ import math
 from skyrim_dataset import SkyrimDataset
 from unet_models import UNetSingleChannel, UNetAlbedo
 from pathlib import Path
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 import numpy as np
 from torchvision.utils import save_image
@@ -21,7 +21,7 @@ from transformers.utils.constants import (
     IMAGENET_DEFAULT_MEAN,
     IMAGENET_DEFAULT_STD,
 )
-from train_dataset import SimpleImageDataset
+from class_materials import CLASS_LIST
 from augmentations import (
     get_random_crop,
     center_crop,
@@ -85,11 +85,6 @@ UNET_MAP = args.map_to_train
 
 print(f"Training phase: {args.phase}, map to train: {UNET_MAP}")
 
-# HYPER_PARAMETERS
-EPOCHS = 14  # Number of epochs to train
-# LR = 1e-3  # Learning rate for the optimizer
-WD = 1e-2  # Weight decay for the optimizer
-# T_MAX = 10  # Max number of epochs for the learning rate scheduler
 PHASE = args.phase  # Phase of the training per plan, used for logging and saving
 
 # Enable TF32 for faster training on Ampere GPUs
@@ -102,63 +97,81 @@ torch.backends.cudnn.benchmark = (
 
 VISUAL_SAMPLES_COUNT = 16  # Number of samples to visualize in validation
 
-matsynth_dir = (BASE_DIR / "../matsynth_processed").resolve()
 skyrim_dir = (BASE_DIR / "../skyrim_processed_for_maps").resolve()
 
-device = torch.device("cuda")
+skyrim_data_file_path = (
+    BASE_DIR
+    / (
+        "../skyrim_data_unet_parallax.json"
+        if UNET_MAP == "parallax"
+        else "../skyrim_data_unet_all.json"
+    )
+).resolve()
 
-# need only for class list
-matsynth_train_dataset = SimpleImageDataset(
-    matsynth_dir=str(matsynth_dir),
-    split="train",
-    skip_init=True,
-)
+device = torch.device("cuda")
 
 
 skyrim_train_dataset = SkyrimDataset(
     skyrim_dir=str(skyrim_dir),
     split="train",
-    load_non_pbr=False,
-    ignore_without_parallax=UNET_MAP == "parallax",
+    data_file=str(skyrim_data_file_path),
 )
 
 skyrim_validation_dataset = SkyrimDataset(
     skyrim_dir=str(skyrim_dir),
     split="validation",
-    load_non_pbr=False,
-    skip_init=True,
+    data_file=str(skyrim_data_file_path),
 )
-skyrim_validation_dataset.all_validation_samples = (
-    skyrim_train_dataset.all_validation_samples
+skyrim_data_file = json.load(open(skyrim_data_file_path, "r"))
+skyrim_sample_weights = skyrim_data_file["sample_weights"]
+skyrim_train_sampler = WeightedRandomSampler(
+    weights=skyrim_sample_weights,
+    num_samples=len(skyrim_sample_weights),
+    replacement=True,
 )
 
-CROP_SIZE = 1024
+CROP_SIZE = 256
 
-BATCH_SIZE = 3
-BATCH_SIZE_VALIDATION = 3
+BATCH_SIZE_VALIDATION = 1
+BATCH_SIZE = 0
+WORKERS = 0
 
-SKYRIM_PHOTOMETRIC = 0.0
+SKYRIM_PHOTOMETRIC = 0.6
+
+USE_ACCUMULATION = False
+ACCUM_STEPS = 2
+
+if CROP_SIZE == 256:
+    BATCH_SIZE = 16
+    WORKERS = 16
+
+if CROP_SIZE == 512:
+    BATCH_SIZE = 4
+    WORKERS = 4
+    USE_ACCUMULATION = True
+
+if CROP_SIZE == 768:
+    BATCH_SIZE = 2
+    WORKERS = 4
+    USE_ACCUMULATION = True
+
+if CROP_SIZE == 1024:
+    BATCH_SIZE = 1
+    WORKERS = 2
+    USE_ACCUMULATION = True
+    ACCUM_STEPS = 4
+
 
 MIN_SAMPLES_TRAIN = len(skyrim_train_dataset)
 MIN_SAMPLES_VALIDATION = len(skyrim_validation_dataset)
 STEPS_PER_EPOCH_TRAIN = math.ceil(MIN_SAMPLES_TRAIN / BATCH_SIZE)
 STEPS_PER_EPOCH_VALIDATION = math.ceil(MIN_SAMPLES_VALIDATION / BATCH_SIZE_VALIDATION)
 
-DATASET_WORKERS = 4
-if CROP_SIZE == 768:
-    # Batch size 6 for 768
-    DATASET_WORKERS = 8
-elif CROP_SIZE < 768:
-    # Batch size 16 for 512 and 32 for 256
-    DATASET_WORKERS = 12
-
-USE_ACCUMULATION = BATCH_SIZE <= 3
-
 resume_training = args.resume
 
 
 def get_model():
-    num_classes = len(matsynth_train_dataset.CLASS_LIST)
+    num_classes = len(CLASS_LIST)
     # AO, height
     unet_channels = 5
     if UNET_MAP == "roughness":
@@ -201,7 +214,7 @@ def get_model():
         # ! Set metal bias # to a value that corresponds to 10% metal pixels in the dataset to prevent early collapse
         # Doing this only on the first init on the first phase. If we're setting weight donor then we're at the first phase
         if UNET_MAP == "metallic":
-            p0 = 0.10
+            p0 = 0.21
             b0 = -math.log((1 - p0) / p0)
             with torch.no_grad():
                 torch.nn.init.constant_(unet.head.bias, b0)  # type: ignore
@@ -219,21 +232,19 @@ def get_model():
 
     # Create segformer and load best weights
     segformer = create_segformer(
-        num_labels=len(matsynth_train_dataset.CLASS_LIST),
+        num_labels=len(CLASS_LIST),
         device=device,
-        lora=True,
+        lora=False,
         frozen=True,
     )
     segformer_best_weights_path = (
-        BASE_DIR / "../weights/s5/segformer/best_model.pt"
+        BASE_DIR / "../weights/s3/segformer/best_model.pt"
     ).resolve()
     print("Loading Segformer weights from:", segformer_best_weights_path)
     segformer_checkpoint = torch.load(segformer_best_weights_path, map_location=device)
-    segformer.base_model.load_state_dict(
-        segformer_checkpoint["base_model_state_dict"],
-    )
+
     segformer.load_state_dict(
-        segformer_checkpoint["lora_state_dict"],
+        segformer_checkpoint["model_state_dict"],
     )
 
     unet_albedo = UNetAlbedo(
@@ -241,7 +252,7 @@ def get_model():
         cond_ch=512,  # Condition channel size, can be adjusted
     ).to(device)
     unet_albedo_best_weights_path = (
-        BASE_DIR / "../weights/a3/unet_albedo/best_model.pt"
+        BASE_DIR / "../weights/a4/unet_albedo/best_model.pt"
     ).resolve()
     print("Loading Unet-albedo weights from:", unet_albedo_best_weights_path)
     unet_albedo_checkpoint = torch.load(
@@ -267,21 +278,27 @@ def transform_train_fn(example):
     roughness = example["roughness"]
     poisson_blur = example["poisson_blur"]
 
-    albedo, normal, diffuse, parallax, metallic, roughness, ao, poisson_blur = (
-        get_random_crop(
-            albedo,
-            normal,
-            size=(CROP_SIZE, CROP_SIZE),
-            diffuse=diffuse,
-            height=parallax,
-            ao=ao,
-            metallic=metallic,
-            roughness=roughness,
-            poisson_blur=poisson_blur,
-            augmentations=True,
-            resize_to=None,
-        )
+    crop_result = get_random_crop(
+        albedo=albedo,
+        normal=normal,
+        size=(CROP_SIZE, CROP_SIZE),
+        diffuse=diffuse,
+        height=parallax,
+        ao=ao,
+        metallic=metallic,
+        roughness=roughness,
+        poisson_blur=poisson_blur,
+        augmentations=True,
+        resize_to=None,
     )
+    albedo = crop_result["albedo"]
+    normal = crop_result["normal"]
+    diffuse = crop_result["diffuse"]
+    parallax = crop_result["height"]
+    metallic = crop_result["metallic"]
+    roughness = crop_result["roughness"]
+    ao = crop_result["ao"]
+    poisson_blur = crop_result["poisson_blur"]
 
     albedo_orig = albedo
     albedo_segformer = albedo
@@ -361,23 +378,25 @@ def transform_val_fn(example):
     roughness = example["roughness"]
     poisson_blur = example["poisson_blur"]
 
+    VAL_CROP_SIZE = 1024
+
     albedo = center_crop(
         albedo,
-        size=(CROP_SIZE, CROP_SIZE),
+        size=(VAL_CROP_SIZE, VAL_CROP_SIZE),
         resize_to=None,
         interpolation=TF.InterpolationMode.LANCZOS,
     )
 
     normal = center_crop(
         normal,
-        size=(CROP_SIZE, CROP_SIZE),
+        size=(VAL_CROP_SIZE, VAL_CROP_SIZE),
         resize_to=None,
         interpolation=TF.InterpolationMode.BILINEAR,
     )
 
     diffuse = center_crop(
         diffuse,
-        size=(CROP_SIZE, CROP_SIZE),
+        size=(VAL_CROP_SIZE, VAL_CROP_SIZE),
         resize_to=None,
         interpolation=TF.InterpolationMode.LANCZOS,
     )
@@ -385,7 +404,7 @@ def transform_val_fn(example):
     parallax = (
         center_crop(
             parallax,
-            size=(CROP_SIZE, CROP_SIZE),
+            size=(VAL_CROP_SIZE, VAL_CROP_SIZE),
             resize_to=None,
             interpolation=TF.InterpolationMode.BICUBIC,
         )
@@ -395,21 +414,21 @@ def transform_val_fn(example):
 
     ao = center_crop(
         ao,
-        size=(CROP_SIZE, CROP_SIZE),
+        size=(VAL_CROP_SIZE, VAL_CROP_SIZE),
         resize_to=None,
         interpolation=TF.InterpolationMode.BILINEAR,
     )
 
     metallic = center_crop(
         metallic,
-        size=(CROP_SIZE, CROP_SIZE),
+        size=(VAL_CROP_SIZE, VAL_CROP_SIZE),
         resize_to=None,
         interpolation=TF.InterpolationMode.BILINEAR,
     )
 
     roughness = center_crop(
         roughness,
-        size=(CROP_SIZE, CROP_SIZE),
+        size=(VAL_CROP_SIZE, VAL_CROP_SIZE),
         resize_to=None,
         interpolation=TF.InterpolationMode.BILINEAR,
     )
@@ -417,7 +436,7 @@ def transform_val_fn(example):
     poisson_blur = (
         center_crop(
             poisson_blur,
-            size=(CROP_SIZE, CROP_SIZE),
+            size=(VAL_CROP_SIZE, VAL_CROP_SIZE),
             resize_to=None,
             interpolation=TF.InterpolationMode.BILINEAR,
         )
@@ -968,6 +987,8 @@ skyrim_validation_dataset.set_transform(transform_val_fn)
 
 # Training loop
 def do_train():
+    EPOCHS = 9
+
     print(
         f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, validation on {MIN_SAMPLES_VALIDATION} samples."
     )
@@ -989,9 +1010,10 @@ def do_train():
     skyrim_train_loader = DataLoader(
         skyrim_train_dataset,
         batch_size=BATCH_SIZE,
-        num_workers=DATASET_WORKERS,
+        sampler=skyrim_train_sampler,
+        num_workers=WORKERS,
         prefetch_factor=2,
-        shuffle=True,
+        shuffle=False,
         pin_memory=True,
         persistent_workers=True,
     )
@@ -1000,7 +1022,7 @@ def do_train():
         skyrim_validation_dataset,
         batch_size=BATCH_SIZE_VALIDATION,
         shuffle=False,
-        num_workers=DATASET_WORKERS,
+        num_workers=2,
         pin_memory=True,
         prefetch_factor=2,
         persistent_workers=True,
@@ -1010,8 +1032,9 @@ def do_train():
 
     skyrim_validation_iter = cycle(skyrim_validation_loader)
 
-    base_enc_lr = 2e-5
-    base_dec_lr = 5e-5
+    WD = 1e-2
+    base_enc_lr = 1e-4
+    base_dec_lr = 2e-4
     # base_enc_lr = 5e-5
     # base_dec_lr = 2e-4
 
@@ -1021,61 +1044,62 @@ def do_train():
         1: ["unet.encoder.0."],
         2: ["unet.encoder.1."],
         3: ["unet.encoder.2."],
-        4: ["unet.bot."],
+        4: ["unet.bot.", "unet.bottleneck_attention."],
     }
 
     n_blocks = len(depth_map)
     param_groups = []
     gamma = 0.9
-    for depth, prefixes in depth_map.items():
-        lr = base_enc_lr * (gamma ** (n_blocks - depth - 1))
-        params = [
-            p
-            for n, p in unet_maps.named_parameters()
-            if any(n.startswith(pref) for pref in prefixes)
-        ]
-        param_groups.append({"params": params, "lr": lr, "weight_decay": WD})
+    # for depth, prefixes in depth_map.items():
+    #     lr = base_enc_lr * (gamma ** (n_blocks - depth - 1))
+    #     params = [
+    #         p
+    #         for n, p in unet_maps.named_parameters()
+    #         if any(n.startswith(pref) for pref in prefixes)
+    #     ]
+    #     param_groups.append({"params": params, "lr": lr, "weight_decay": WD})
 
     # decoder + film + each head all at base_dec_lr
-    param_groups += [
-        # {
-        #     "params": unet_maps.unet.encoder.parameters(),
-        #     "lr": base_enc_lr,
-        #     "weight_decay": WD,
-        # },
-        # {
-        #     "params": unet_maps.unet.inc.parameters(),
-        #     "lr": base_enc_lr,
-        #     "weight_decay": WD,
-        # },
-        # {
-        #     "params": unet_maps.unet.bot.parameters(),
-        #     "lr": base_enc_lr,
-        #     "weight_decay": WD,
-        # },
-        {
-            "params": unet_maps.unet.decoder.parameters(),
-            "lr": base_dec_lr,
-            "weight_decay": WD,
-        },
-        {"params": unet_maps.unet.film.parameters(), "lr": base_dec_lr, "weight_decay": 0.0},  # type: ignore # No WD for FiLM
-        # {"params": unet_maps.unet.mask_film.parameters(), "lr": base_dec_lr, "weight_decay": 0.0},  # type: ignore # No WD for FiLM
-        {
-            "params": unet_maps.head.parameters(),
-            "lr": base_dec_lr,
-            "weight_decay": WD,
-        },
+
+    enc_params = [
+        p
+        for n, p in unet_maps.named_parameters()
+        if (
+            "unet.inc." in n
+            or "unet.encoder." in n
+            or "unet.bot." in n
+            or "unet.bottleneck_attention." in n
+        )
+        and p.requires_grad
     ]
+    param_groups.append({"params": enc_params, "lr": base_enc_lr, "weight_decay": WD})
+
+    decoder_params = [
+        p
+        for n, p in unet_maps.named_parameters()
+        if "unet.decoder." in n and p.requires_grad
+    ]
+    param_groups.append(
+        {"params": decoder_params, "lr": base_dec_lr, "weight_decay": WD}
+    )
+
+    film_params = [
+        p
+        for n, p in unet_maps.named_parameters()
+        if "unet.film." in n and p.requires_grad
+    ]
+    param_groups.append({"params": film_params, "lr": base_dec_lr, "weight_decay": 0.0})
+
+    head_params = [
+        p for n, p in unet_maps.named_parameters() if "out." in n and p.requires_grad
+    ]
+    param_groups.append({"params": head_params, "lr": base_dec_lr, "weight_decay": WD})
     # for n, p in unet_maps.named_parameters():
     #     print(f"Param: {n}")
 
     # trainable = [p for p in unet_maps.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
         param_groups,
-        # trainable,
-        # param_groups,
-        # lr=base_dec_lr,
-        # weight_decay=WD,
         betas=(0.9, 0.999),
         eps=1e-8,
     )
@@ -1099,7 +1123,7 @@ def do_train():
         optimizer,
         T_max=(EPOCHS - 1) * effective_steps_per_epoch,
         # eta_min=base_enc_lr * 0.05,
-        eta_min=base_dec_lr * 0.05,
+        eta_min=base_enc_lr * 0.05,
         # eta_min=base_dec_lr * 0.1,
     )
 
@@ -1154,7 +1178,6 @@ def do_train():
                 "batch_count": 0,
             },
         }
-        accum_steps = 2
 
         bar = tqdm(
             range(STEPS_PER_EPOCH_TRAIN),
@@ -1239,16 +1262,27 @@ def do_train():
                 )
 
             if UNET_MAP == "metallic":
-                seg_mask = F.one_hot(
-                    segformer_pred.argmax(1),
-                    num_classes=len(matsynth_train_dataset.CLASS_LIST),
-                )  # (B,H,W,K)
-                seg_mask = seg_mask.permute(0, 3, 1, 2).float()  # → (B,K,H,W)
+                # seg_mask = F.one_hot(
+                #     segformer_pred.argmax(1),
+                #     num_classes=len(CLASS_LIST),
+                # )  # (B,H,W,K)
+                # seg_mask = seg_mask.permute(0, 3, 1, 2).float()  # → (B,K,H,W)
+                seg_probs = F.softmax(segformer_pred, dim=1)
+
+                thresh = 0.2
+                # Zero out any class‐probabilities below the threshold
+                probs_thresh = torch.where(
+                    seg_probs < thresh, torch.zeros_like(seg_probs), seg_probs
+                )
+
+                # Renormalize so the channels still sum to 1
+                sum_probs = probs_thresh.sum(dim=1, keepdim=True).clamp_min(1e-6)
+                probs_renorm = probs_thresh / sum_probs
 
                 input = torch.cat(
                     [
                         predicted_albedo,
-                        seg_mask,
+                        probs_renorm,
                     ],
                     dim=1,
                 )
@@ -1273,7 +1307,7 @@ def do_train():
             epoch_data["train"]["batch_count"] += 1
 
             if USE_ACCUMULATION:
-                loss = loss / accum_steps  # Scale loss for accumulation
+                loss = loss / ACCUM_STEPS  # Scale loss for accumulation
 
             scaler.scale(loss).backward()
             # scaler.unscale_(optimizer)
@@ -1286,7 +1320,7 @@ def do_train():
                 scheduler.step()
 
             if USE_ACCUMULATION:
-                if (i + 1) % accum_steps == 0 or (i + 1) == STEPS_PER_EPOCH_TRAIN:
+                if (i + 1) % ACCUM_STEPS == 0 or (i + 1) == STEPS_PER_EPOCH_TRAIN:
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
@@ -1387,16 +1421,27 @@ def do_train():
                     )
 
                 if UNET_MAP == "metallic":
-                    seg_mask = F.one_hot(
-                        segformer_pred.argmax(1),
-                        num_classes=len(matsynth_train_dataset.CLASS_LIST),
-                    )  # (B,H,W,K)
-                    seg_mask = seg_mask.permute(0, 3, 1, 2).float()  # → (B,K,H,W)
+                    # seg_mask = F.one_hot(
+                    #     segformer_pred.argmax(1),
+                    #     num_classes=len(CLASS_LIST),
+                    # )  # (B,H,W,K)
+                    # seg_mask = seg_mask.permute(0, 3, 1, 2).float()  # → (B,K,H,W)
+                    seg_probs = F.softmax(segformer_pred, dim=1)
+
+                    thresh = 0.2
+                    # Zero out any class‐probabilities below the threshold
+                    probs_thresh = torch.where(
+                        seg_probs < thresh, torch.zeros_like(seg_probs), seg_probs
+                    )
+
+                    # Renormalize so the channels still sum to 1
+                    sum_probs = probs_thresh.sum(dim=1, keepdim=True).clamp_min(1e-6)
+                    probs_renorm = probs_thresh / sum_probs
 
                     input = torch.cat(
                         [
                             predicted_albedo,
-                            seg_mask,
+                            probs_renorm,
                         ],
                         dim=1,
                     )
@@ -1441,34 +1486,16 @@ def do_train():
                         output_path = output_dir / f"val_samples_{epoch + 1}"
                         output_path.mkdir(parents=True, exist_ok=True)
 
-                        visual_sample_gt = torch.cat(
+                        visual_sample = torch.cat(
                             [
                                 sample_diffuse,
                                 sample_normal,
                                 # sample_albedo_gt,
                                 to_rgb(gt),
-                            ],
-                            dim=2,  # Concatenate along width
-                        )
-                        visual_sample_predicted = torch.cat(
-                            [
-                                sample_diffuse,
-                                sample_normal,
-                                # sample_albedo_pred,
                                 to_rgb(torch.sigmoid(predicted)),
                             ],
                             dim=2,  # Concatenate along width
-                        )
-
-                        visual_sample = torch.cat(
-                            [
-                                visual_sample_gt,  # GT
-                                visual_sample_predicted,  # Predicted
-                            ],
-                            dim=1,  # Concatenate along height
-                        ).clamp(
-                            0, 1
-                        )  # Clamp to [0, 1] for saving
+                        ).clamp(0, 1)
 
                         save_image(visual_sample, output_path / f"{sample_name}.png")
 
