@@ -80,18 +80,18 @@ Start from scratch
 | Phase  | Crop | Epochs | Enc LR            | Dec LR | Optimizer | Scheduler                                                                          |
 | ------ | ---- | ------ | ----------------- | ------ | --------- | ---------------------------------------------------------------------------------- |
 | **P0** | 256  | 8      | 1e‑4              | 2e‑4   | AdamW     | warmup linearLR 1 epoch, start_lr=0.3, cosine t_max=epochs-1,eta_min=`enc_lr*0.05` |
-| **P1** | 512  | 8      | 1e‑4 (LLRD 0.8^d) | 2e‑4   | AdamW     | same                                                                               |
-| **P2** | 768  | 14     | 8e‑5 (LLDR 0.8^d) | 1.6e‑4 | AdamW     | same                                                                               |
+| **P1** | 512  | 8      | 1e‑4 (LLRD 0.9^d) | 2e‑4   | AdamW     | same                                                                               |
+| **P2** | 768  | 14     | 8e‑5 (LLDR 0.9^d) | 1.6e‑4 | AdamW     | same                                                                               |
 | **P3** | 1024 | 5      | frozen            | 1.0e‑4 | AdamW     | same                                                                               |
 
 ## 3.4 Unet-Maps input
 
-| Map       | Input                                                               |
-| --------- | ------------------------------------------------------------------- |
-| height    | normal + mean curvature + poisson-coarse                            |
-| ao        | normal + mean curvature + poisson-coarse                            |
-| roughness | albedo + normal + segformer mask (K channels) (both channel & FiLM) |
-| metallic  | albedo + segformer mask (K channels) (both as channel and FiLM)     |
+| Map       | Input                                                                   |
+| --------- | ----------------------------------------------------------------------- |
+| height    | normal + mean curvature + poisson-coarse                                |
+| ao        | normal + mean curvature + poisson-coarse                                |
+| roughness | albedo + normal + segformer softmask (K channels) (both channel & FiLM) |
+| metallic  | albedo + segformer softmask (K channels) (both as channel and FiLM)     |
 
 ## 3.5 Per‑map network & loss recipes
 

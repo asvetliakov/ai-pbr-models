@@ -103,3 +103,56 @@ Class weights for training dataset:
 2443.000176668167
 Min/Max weight: 0.7232559323310852 2.410853862762451
 Oversample factor for heaviest image: 3.3333343772130077
+
+
+----------------------- Unet-Parallax dataset info ----------------------
+Pixels per class (All):
+fabric: 459955961 pixels (8.1120%)
+ground: 661278506 pixels (11.6626%)
+leather: 208432475 pixels (3.6760%)
+metal: 759094069 pixels (13.3878%)
+stone: 2514113728 pixels (44.3401%)
+wood: 1067188674 pixels (18.8215%)
+
+Samples per class with >40% ratio:
+fabric: 208 samples
+ground: 267 samples
+leather: 157 samples
+metal: 373 samples
+stone: 1067 samples
+wood: 490 samples
+
+Validation set size: 250
+Training set size: 2256
+
+Class weights for training dataset:
+{'fabric': 1.144883274956107, 'ground': 0.9769040783800758, 'leather': 1.760962304703703, 'metal': 0.8892416868562821, 'stone': 0.4859172365844548, 'wood': 0.7420914185193779}
+2256.000212430954
+Min/Max weight: 0.757355809211731 2.5245201587677
+Oversample factor for heaviest image: 3.33333438267974
+
+----------------------- Unet-Maps (except parallax) dataset info ----------------------
+Pixels per class (All):
+fabric: 949110070 pixels (11.8552%)
+ground: 668381776 pixels (8.3487%)
+leather: 727010977 pixels (9.0810%)
+metal: 1684118953 pixels (21.0361%)
+stone: 2713622293 pixels (33.8954%)
+wood: 1263617256 pixels (15.7837%)
+
+Samples per class with >40% ratio:
+fabric: 383 samples
+ground: 269 samples
+leather: 364 samples
+metal: 752 samples
+stone: 1159 samples
+wood: 558 samples
+
+Validation set size: 336
+Training set size: 3026
+
+Class weights for training dataset:
+{'fabric': 1.0838312780734976, 'ground': 1.3024449437117986, 'leather': 1.247075788676818, 'metal': 0.8092630788514052, 'stone': 0.6308490467882556, 'wood': 0.9265358638982252}
+3026.000090241432
+Min/Max weight: 0.655806303024292 2.1860218048095703
+Oversample factor for heaviest image: 3.3333345451676712

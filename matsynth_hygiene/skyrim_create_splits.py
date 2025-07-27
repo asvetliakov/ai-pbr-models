@@ -55,6 +55,13 @@ def process_mask(path: Path):
         print(f"Skipping excluded mask: {path}")
         return class_counts, total, path, is_square
 
+    # is_excluded = path.with_name(
+    #     path.name.replace("_mask.png", "_basecolor_exclude_parallax.txt")
+    # ).exists()
+    # if is_excluded:
+    #     print(f"Skipping excluded mask: {path}")
+    #     return class_counts, total, path, is_square
+
     # parallax_name = path.with_name(path.name.replace("_mask.png", "_parallax.png"))
     # if not parallax_name.exists():
     #     print(f"Missing parallax for mask: {path}")
