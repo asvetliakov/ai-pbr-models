@@ -7,9 +7,9 @@ import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_DIR = Path(__file__).resolve().parent
-INPUT_DIR = (BASE_DIR / "../skyrim_processed/pbr").resolve()
+INPUT_DIR = (BASE_DIR / "../skyrim_processed_for_maps").resolve()
 
-json_path = BASE_DIR / "../skyrim_data_unet_albedo.json"
+json_path = BASE_DIR / "../skyrim_data_unet_all.json"
 
 CLASS_LIST = [
     "fabric",
@@ -54,6 +54,11 @@ def process_mask(path: Path):
     if is_excluded:
         print(f"Skipping excluded mask: {path}")
         return class_counts, total, path, is_square
+
+    # parallax_name = path.with_name(path.name.replace("_mask.png", "_parallax.png"))
+    # if not parallax_name.exists():
+    #     print(f"Missing parallax for mask: {path}")
+    #     return class_counts, total, path, is_square
 
     for idx, color in CLASS_PALETTE.items():
         mask_color = np.all(mask_array == color, axis=-1)

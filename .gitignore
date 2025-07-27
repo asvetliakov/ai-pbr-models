@@ -13,5 +13,7 @@ skyrim_cache_all.json
 skyrim_cache_pbr.json
 skyrim_data_segformer.json
 skyrim_data_unet_albedo.json
+skyrim_data_unet_parallax.json
+skyrim_data_unet_all.json
 matsynth_cache.json
 temp
