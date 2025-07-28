@@ -58,22 +58,11 @@ _Loss mask dropout for majority classes_: 20% in S0/S1, disabled from S2
 | **A3** | 100 % Sky   | **enc + dec + FiLM**        | **768**              | A1 aug + SkyPhoto 0.3     |     12 | AdamW — enc 5e‑6 · dec 4e‑5 · FiLM 5e‑5 · head 4e‑5   | cosine‑12, eta_min=3e-6             | same                           |
 | **A4** | 100 % Sky   | **dec + head** (enc frozen) | **1 024**            | A1 aug + SkyPhoto 0.15    |      8 | AdamW — dec 1.5e‑5 · head 2e‑5                        | cosine-5, eta_min=3e-6              | same                           |
 
-_Save the **best A3** checkpoint → encoder donor for Maps._
-
 ---
 
 ## 3. Separate Unet per map (M)
 
-## 3.1 Roughness & Metallic:
-
-Import weights from A3, re-init first conv (kaiming normal on conv.weight)
-
-|  Phase | Dataset   | Encoder init           | Trainables        | **Crop / Feed (px)** | Epochs | Optimiser & LR                                | Scheduler              | Core losses |
-| -----: | --------- | ---------------------- | ----------------- | -------------------- | -----: | --------------------------------------------- | ---------------------- | ----------- |
-| **M0** | 100 % Sky | best A4 (strict False) | enc + dec + heads | **768**              |      6 | AdamW: enc 5e‑5 (LLRD 0.9^d) · dec/heads 2e‑4 | cosine‑6,eta_min=5e-6  | See table   |
-| **M1** | 100 % Sky | from M0                | enc + dec + heads | **1 024**            |     12 | AdamW: enc 1e‑5 (LLRD) · dec/heads 4e‑5       | cosine‑12,eta_min=1e-6 | same        |
-
-## 3.2 Height & AO
+## 3.1 Training plan
 
 Start from scratch
 
@@ -84,23 +73,23 @@ Start from scratch
 | **P2** | 768  | 14     | 8e‑5 (LLDR 0.9^d) | 1.6e‑4 | AdamW     | same                                                                              |
 | **P3** | 1024 | 5      | frozen            | 1.0e‑4 | AdamW     | same                                                                              |
 
-## 3.4 Unet-Maps input
+## 3.2 Unet-Maps input
 
-| Map       | Input                                                                   |
-| --------- | ----------------------------------------------------------------------- |
-| height    | normal + mean curvature + poisson-coarse                                |
-| ao        | normal + mean curvature + poisson-coarse                                |
-| roughness | albedo + normal + segformer softmask (K channels) (both channel & FiLM) |
-| metallic  | albedo + segformer softmask (K channels) (both as channel and FiLM)     |
+| Map       | Input                                                                                    |
+| --------- | ---------------------------------------------------------------------------------------- |
+| height    | normal + mean curvature + poisson-coarse                                                 |
+| ao        | normal + mean curvature + poisson-coarse                                                 |
+| roughness | albedo + normal + segformer mask (K channels, gated by confidence) (both channel & FiLM) |
+| metallic  | albedo + segformer mask (K channels, gated by confidence) (both as channel and FiLM)     |
 
-## 3.5 Per‑map network & loss recipes
+## 3.3 Per‑map network & loss recipes
 
 | map        | loss = _λᵢ·termᵢ_                                                                                              |
 | ---------- | -------------------------------------------------------------------------------------------------------------- |
 | **Height** | `1.0·L1 + 0.25·GradDiff + 0.06·TV + 0.15->0.10(decay in P2)·Normal‑Reproj + 0.06·MS‑SSIM + 0.1*Laplacian-Pyr ` |
 | **AO**     | `1.0·L1 + 0.15·Sobel + 0.1·MS‑SSIM`                                                                            |
 | **Rough**  | `1.0·Focal-Relative-L1 + 0.1·MS‑SSIM + 0.02·Sobel`                                                             |
-| **Metal**  | `1.0*Focal BCE(a=0.25,g=2.0) + 0.7*Focal-Tversky(a=0.7,b=0.3,g=1.5) + 0.05*Sobel + 0.05*L1`                    |
+| **Metal**  | `1.0*Focal BCE(a=0.25,g=2.0) + 0.7*Focal-Tversky(a=0.7,b=0.3,g=1.5) + 0.08*Sobel + 0.05*L1`                    |
 
 ## 4. Composite‑mosaic rules
 
