@@ -131,7 +131,7 @@ skyrim_train_sampler = WeightedRandomSampler(
     replacement=True,
 )
 
-CROP_SIZE = 512
+CROP_SIZE = 256
 
 BATCH_SIZE_VALIDATION = 1
 BATCH_SIZE = 0
@@ -196,9 +196,7 @@ def get_model():
     num_classes = len(CLASS_LIST)
     # AO, height
     unet_channels = 5
-    if UNET_MAP == "roughness":
-        unet_channels = 6 + num_classes  # RGB + Normal + Segformer mask
-    elif UNET_MAP == "metallic":
+    if UNET_MAP == "roughness" or UNET_MAP == "metallic":
         unet_channels = 6 + num_classes  # RGB + Normal + Segformer mask
 
     unet = UNetSingleChannel(in_ch=unet_channels, cond_ch=512).to(device)  # type: ignore
@@ -208,7 +206,7 @@ def get_model():
         print(f"Loading model from weight donor: {weight_donor_path}")
         weight_donor_checkpoint = torch.load(weight_donor_path, map_location=device)
 
-        if UNET_MAP == "metallic":
+        if UNET_MAP == "metallic" or UNET_MAP == "roughness":
             with torch.no_grad():
 
                 w_old = weight_donor_checkpoint["unet_albedo_model_state_dict"][
@@ -1079,7 +1077,7 @@ def is_norm_param(name, module):
 
 # Training loop
 def do_train():
-    EPOCHS = 13
+    EPOCHS = 20
 
     print(
         f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, validation on {MIN_SAMPLES_VALIDATION} samples."
@@ -1122,7 +1120,7 @@ def do_train():
 
     skyrim_train_iter = cycle(skyrim_train_loader)
 
-    base_enc_lr = 1e-4
+    base_enc_lr = 2e-4
     base_dec_lr = 2e-4
     # base_enc_lr = 5e-5
     # base_dec_lr = 2e-4
@@ -1169,8 +1167,8 @@ def do_train():
             if depth is None:
                 lr = base_dec_lr  # decoder / head
             else:
-                lr = base_enc_lr * (gamma ** (4 - depth))
-                # lr = base_enc_lr
+                # lr = base_enc_lr * (gamma ** (4 - depth))
+                lr = base_enc_lr
 
             # print(f"Parameter: {full_name}, LR: {lr}, WD: {wd}, Depth: {depth}")
 
@@ -1202,12 +1200,12 @@ def do_train():
         optimizer,
         start_factor=0.3,
         end_factor=1.0,
-        total_iters=effective_steps_per_epoch,
+        total_iters=effective_steps_per_epoch * 2,
     )
 
     cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=(EPOCHS - 1) * effective_steps_per_epoch,
+        T_max=(EPOCHS - 2) * effective_steps_per_epoch,
         # eta_min=base_enc_lr * 0.05,
         eta_min=base_enc_lr * 0.1,
         # eta_min=base_dec_lr * 0.1,
@@ -1217,7 +1215,7 @@ def do_train():
         optimizer,
         schedulers=[warmup, cosine],
         milestones=[
-            effective_steps_per_epoch,
+            effective_steps_per_epoch * 2,
         ],  # After first epoch switch to cosine
     )
 
@@ -1341,7 +1339,7 @@ def do_train():
             #     dim=1,
             # )
 
-            if UNET_MAP == "metallic":
+            if UNET_MAP == "metallic" or UNET_MAP == "roughness":
                 seg_probs = F.softmax(segformer_pred, dim=1)
 
                 # Hard confidence gating to avoid ambiguous signals
@@ -1492,7 +1490,7 @@ def do_train():
                 #     )
                 visualize_masks = None
 
-                if UNET_MAP == "metallic":
+                if UNET_MAP == "metallic" or UNET_MAP == "roughness":
                     seg_probs = F.softmax(segformer_pred, dim=1)
 
                     # Hard confidence gating to avoid ambiguous signals

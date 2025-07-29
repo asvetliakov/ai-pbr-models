@@ -80,7 +80,7 @@ _Loss mask dropout for majority classes_: 20% in S0/S1, disabled from S2
 | **M0** | 256  | 20     | 2e‑4              | 2e‑4   | AdamW     | warmup linearLR 2 epoch, start_lr=0.3, cosine t_max=epochs-1,eta_min=`enc_lr*0.1` |
 | **M1** | 512  | 13     | 1e‑4 (LLRD 0.9^d) | 2e‑4   | AdamW     | same, but warmup 1 epoch                                                          |
 | **M2** | 768  | 13     | 8e‑5 (LLDR 0.9^d) | 1.6e‑4 | AdamW     | same                                                                              |
-| **M3** | 1024 | 5      | frozen            | 1.0e‑4 | AdamW     | same                                                                              |
+| **M3** | 1024 | 6      | frozen            | 1.0e‑4 | AdamW     | same                                                                              |
 
 ## 3.2 Unet-Maps input
 
