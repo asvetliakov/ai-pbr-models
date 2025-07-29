@@ -131,7 +131,7 @@ skyrim_train_sampler = WeightedRandomSampler(
     replacement=True,
 )
 
-CROP_SIZE = 256
+CROP_SIZE = 512
 
 BATCH_SIZE_VALIDATION = 1
 BATCH_SIZE = 0
@@ -197,9 +197,9 @@ def get_model():
     # AO, height
     unet_channels = 5
     if UNET_MAP == "roughness":
-        unet_channels = 6
+        unet_channels = 6 + num_classes  # RGB + Normal + Segformer mask
     elif UNET_MAP == "metallic":
-        unet_channels = 3 + num_classes  # RGB + Segformer mask
+        unet_channels = 6 + num_classes  # RGB + Normal + Segformer mask
 
     unet = UNetSingleChannel(in_ch=unet_channels, cond_ch=512).to(device)  # type: ignore
 
@@ -215,15 +215,14 @@ def get_model():
                     "unet.inc.conv.0.weight"
                 ]  # torch.Size([64, 6, 3, 3])
 
-                w_rgb = w_old[:, :3, :, :].clone()  # torch.Size([64, 3, 3, 3])
                 w_mask = torch.empty(
                     (w_old.size(0), num_classes, *w_old.shape[2:]),
                     device=w_old.device,
                     dtype=w_old.dtype,
                 )
-                torch.nn.init.kaiming_normal_(w_mask, mode="fan_out")
+                torch.nn.init.kaiming_normal_(w_mask, mode="fan_in")
 
-                w_new = torch.cat((w_rgb, w_mask), dim=1)
+                w_new = torch.cat((w_old, w_mask), dim=1)
 
                 weight_donor_checkpoint["unet_albedo_model_state_dict"][
                     "unet.inc.conv.0.weight"
@@ -753,30 +752,34 @@ def calculate_metallic_loss(
     gt: torch.Tensor,
     epoch_data: dict,
     key="train",
+    seg_probs=None,  # Add segformer probabilities
 ) -> torch.Tensor:
     if epoch_data[key].get("total_loss") is None:
         epoch_data[key]["bce"] = 0
         epoch_data[key]["tversky"] = 0.0
         epoch_data[key]["l1_loss"] = 0.0
         epoch_data[key]["edge_loss"] = 0.0
-        # epoch_data[key]["dice_loss"] = 0.0
+        epoch_data[key]["ssim_loss"] = 0.0
+        epoch_data[key]["material_penalty"] = 0.0
         epoch_data[key]["total_loss"] = 0.0
 
-    metal_positive = gt.sum().float()
-    metal_negative = (gt.numel() - metal_positive).float()
-    metal_weights = (
-        ((metal_negative + 1e-6) / (metal_positive + 1e-6))
-        .clamp(min=1.0, max=4.0)
-        .to(device)
-    )
+    # metal_positive = gt.sum().float()
+    # metal_negative = (gt.numel() - metal_positive).float()
 
-    # Focal BCE, pixel‑level class‑balance
+    # metal_weights = (
+    #     ((metal_negative + 1e-6) / (metal_positive + 1e-6))
+    #     .clamp(min=1.0, max=2.5)
+    #     .to(device)
+    # )
+
+    # No class weighting needed - segformer masks provide material context
+    # Focal BCE handles hard examples, material masks handle class imbalance
     bce_loss = focal_bce_with_logits(
-        pred, gt, gamma=2.0, alpha=0.25, pos_weight=metal_weights, reduction="mean"
+        pred, gt, gamma=2.0, alpha=0.25, pos_weight=None, reduction="mean"
     )
     epoch_data[key]["bce"] += bce_loss.item()
 
-    prob = torch.sigmoid(pred)
+    prob = torch.sigmoid(pred).float()
 
     # Tversky loss, region & FP‑heavy penalty
     tversky_loss = focal_tversky_loss(prob, gt, alpha=0.7, beta=0.3, gamma=1.5)
@@ -790,15 +793,51 @@ def calculate_metallic_loss(
     l1_metal_loss = F.l1_loss(prob, gt, reduction="mean").float()
     epoch_data[key]["l1_loss"] += l1_metal_loss.item()
 
-    # dice_metal_loss = dice_loss(prob, gt).float()
-    # epoch_data[key]["dice_loss"] += dice_metal_loss.item()
+    # SSIM for texture preservation in metallic regions
+    ssim_metal = FM.multiscale_structural_similarity_index_measure(
+        prob, gt.clamp(0, 1).float(), data_range=1.0
+    )
+    ssim_metal = torch.nan_to_num(ssim_metal, nan=1.0).float()
+    ssim_metal_loss = (1 - ssim_metal).float()
+    epoch_data[key]["ssim_loss"] += ssim_metal_loss.item()
 
-    # Weighted sum of losses
+    # Material-aware penalty: discourage metallic predictions in non-metal regions
+    material_penalty = torch.tensor(0.0, device=pred.device)
+    if seg_probs is not None:
+        metal_idx = CLASS_LIST.index("metal")
+        non_metal_indices = [i for i in range(len(CLASS_LIST)) if i != metal_idx]
+        non_metal_prob = seg_probs[:, non_metal_indices].sum(dim=1, keepdim=True)
+
+        # --- Two-Tier Confidence Gating ---
+        # For the loss penalty, we use a HIGH confidence threshold (0.7).
+        # This is a CONSERVATIVE approach: we only penalize the model for predicting metal
+        # when the Segformer is VERY confident the material is NOT metal. This avoids
+        # punishing the model for Segformer's own uncertainty in ambiguous regions.
+        max_probs, _ = torch.max(seg_probs, dim=1, keepdim=True)
+        confidence_thresh = 0.7  # Higher threshold for penalty
+        high_conf_mask = max_probs > confidence_thresh
+
+        # Only penalize where segformer is confident about non-metal
+        # Debug: Check for invalid values before BCE
+        penalty_input = (prob * non_metal_prob * high_conf_mask).float()
+
+        penalty_input = penalty_input.clamp(0.0, 1.0)
+        penalty_target = torch.zeros_like(penalty_input).float()
+        material_penalty = F.binary_cross_entropy(
+            penalty_input,
+            penalty_target,
+            reduction="mean",
+        ).float()
+    epoch_data[key]["material_penalty"] += material_penalty.item()
+
+    # Weighted sum of losses - Tversky should help with false positives
     total_loss = (
         1.0 * bce_loss
-        + 0.7 * tversky_loss
-        + 0.08 * edge_metal_loss
-        + 0.05 * l1_metal_loss
+        + 0.3 * tversky_loss
+        + 0.05 * edge_metal_loss
+        + 0.1 * l1_metal_loss
+        + 0.1 * ssim_metal_loss
+        + 0.15 * material_penalty  # Add material consistency penalty
     )
     epoch_data[key]["total_loss"] += total_loss.item()
 
@@ -937,11 +976,17 @@ def get_loss(
     normal_map: torch.Tensor,
     epoch_data: dict,
     key="train",
+    seg_probs=None,  # Add segformer probabilities for metallic loss
 ) -> torch.Tensor:
+    pred = pred.float()
+    gt = gt.float()
+    normal_map = normal_map.float()
+    seg_probs = seg_probs.float() if seg_probs is not None else None
+
     if UNET_MAP == "roughness":
         return calculate_rougness_loss(pred, gt, epoch_data, key)
     elif UNET_MAP == "metallic":
-        return calculate_metallic_loss(pred, gt, epoch_data, key)
+        return calculate_metallic_loss(pred, gt, epoch_data, key, seg_probs)
     elif UNET_MAP == "ao":
         return calculate_ao_loss(pred, gt, epoch_data, key)
     elif UNET_MAP == "parallax":
@@ -1034,7 +1079,7 @@ def is_norm_param(name, module):
 
 # Training loop
 def do_train():
-    EPOCHS = 9
+    EPOCHS = 13
 
     print(
         f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, validation on {MIN_SAMPLES_VALIDATION} samples."
@@ -1124,8 +1169,8 @@ def do_train():
             if depth is None:
                 lr = base_dec_lr  # decoder / head
             else:
-                # lr = base_enc_lr * (gamma ** (4 - depth))
-                lr = base_enc_lr
+                lr = base_enc_lr * (gamma ** (4 - depth))
+                # lr = base_enc_lr
 
             # print(f"Parameter: {full_name}, LR: {lr}, WD: {wd}, Depth: {depth}")
 
@@ -1299,29 +1344,26 @@ def do_train():
             if UNET_MAP == "metallic":
                 seg_probs = F.softmax(segformer_pred, dim=1)
 
-                # 1. Get the top probability and its index
+                # Hard confidence gating to avoid ambiguous signals
                 max_probs, max_indices = torch.max(seg_probs, dim=1, keepdim=True)
-
-                # 2. Create a one-hot encoded mask from the max indices
                 one_hot_mask = torch.zeros_like(seg_probs)
                 one_hot_mask.scatter_(1, max_indices, 1)
 
-                # 3. Use a confidence threshold to filter out uncertain predictions
-                confidence_thresh = 0.7
-                # Create a mask for pixels where confidence is high
+                # Use lower confidence threshold but add explicit non-metal suppression
+                confidence_thresh = 0.5
                 high_conf_mask = (max_probs > confidence_thresh).float()
-
-                # 4. Apply the confidence mask to the one-hot mask
-                # This will zero out the masks for low-confidence pixels
                 final_mask = one_hot_mask * high_conf_mask
 
                 input = torch.cat(
                     [
                         predicted_albedo,
+                        normal,
                         final_mask,
                     ],
                     dim=1,
                 )
+            else:
+                seg_probs = None
 
             with autocast(device_type=device.type):
                 # Get predicted map from UNet
@@ -1333,6 +1375,7 @@ def do_train():
                 normal,
                 epoch_data,
                 key="train",
+                seg_probs=seg_probs,  # Pass segformer probabilities
             )
 
             if torch.isnan(loss):
@@ -1370,7 +1413,7 @@ def do_train():
 
             num_samples_saved = 0
 
-            for _, skyrim_batch in enumerate(
+            for i, skyrim_batch in enumerate(
                 tqdm(
                     skyrim_validation_loader,
                     desc=f"Epoch {epoch + 1}/{EPOCHS} - Validation",
@@ -1450,37 +1493,28 @@ def do_train():
                 visualize_masks = None
 
                 if UNET_MAP == "metallic":
-                    # seg_mask = F.one_hot(
-                    #     segformer_pred.argmax(1),
-                    #     num_classes=len(CLASS_LIST),
-                    # )  # (B,H,W,K)
-                    # seg_mask = seg_mask.permute(0, 3, 1, 2).float()  # → (B,K,H,W)
                     seg_probs = F.softmax(segformer_pred, dim=1)
 
-                    # 1. Get the top probability and its index
+                    # Hard confidence gating to avoid ambiguous signals
                     max_probs, max_indices = torch.max(seg_probs, dim=1, keepdim=True)
-
-                    # 2. Create a one-hot encoded mask from the max indices
                     one_hot_mask = torch.zeros_like(seg_probs)
                     one_hot_mask.scatter_(1, max_indices, 1)
 
-                    # 3. Use a confidence threshold to filter out uncertain predictions
-                    confidence_thresh = 0.7
-                    # Create a mask for pixels where confidence is high
+                    confidence_thresh = 0.5
                     high_conf_mask = (max_probs > confidence_thresh).float()
-
-                    # 4. Apply the confidence mask to the one-hot mask
-                    # This will zero out the masks for low-confidence pixels
                     final_mask = one_hot_mask * high_conf_mask
                     visualize_masks = final_mask
 
                     input = torch.cat(
                         [
                             predicted_albedo,
+                            normal,
                             final_mask,
                         ],
                         dim=1,
                     )
+                else:
+                    seg_probs = None
 
                 with autocast(device_type=device.type):
                     # Get predicted map from UNet
@@ -1492,6 +1526,7 @@ def do_train():
                     normal,
                     epoch_data,
                     key="validation",
+                    seg_probs=seg_probs,  # Pass segformer probabilities
                 )
 
                 epoch_data["validation"]["batch_count"] += 1
@@ -1510,10 +1545,12 @@ def do_train():
                         dtype=torch.long,
                     )
 
-                if (
-                    VISUAL_SAMPLES_COUNT > 0
-                    and num_samples_saved < VISUAL_SAMPLES_COUNT
-                ):
+                # Save image every 4th batch
+                should_save_image = (
+                    i % 4 == 0 and num_samples_saved < VISUAL_SAMPLES_COUNT
+                )
+
+                if VISUAL_SAMPLES_COUNT > 0 and should_save_image:
                     for (
                         sample_name,
                         sample_diffuse,
