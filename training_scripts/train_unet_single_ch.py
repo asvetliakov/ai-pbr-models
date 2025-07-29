@@ -131,7 +131,7 @@ skyrim_train_sampler = WeightedRandomSampler(
     replacement=True,
 )
 
-CROP_SIZE = 256
+CROP_SIZE = 512
 
 BATCH_SIZE_VALIDATION = 1
 BATCH_SIZE = 0
@@ -1077,7 +1077,7 @@ def is_norm_param(name, module):
 
 # Training loop
 def do_train():
-    EPOCHS = 20
+    EPOCHS = 13
 
     print(
         f"Starting training for {EPOCHS} epochs, on {(STEPS_PER_EPOCH_TRAIN * BATCH_SIZE)} Samples, validation on {MIN_SAMPLES_VALIDATION} samples."
@@ -1120,7 +1120,7 @@ def do_train():
 
     skyrim_train_iter = cycle(skyrim_train_loader)
 
-    base_enc_lr = 2e-4
+    base_enc_lr = 1e-4
     base_dec_lr = 2e-4
     # base_enc_lr = 5e-5
     # base_dec_lr = 2e-4
@@ -1167,8 +1167,8 @@ def do_train():
             if depth is None:
                 lr = base_dec_lr  # decoder / head
             else:
-                # lr = base_enc_lr * (gamma ** (4 - depth))
-                lr = base_enc_lr
+                lr = base_enc_lr * (gamma ** (4 - depth))
+                # lr = base_enc_lr
 
             # print(f"Parameter: {full_name}, LR: {lr}, WD: {wd}, Depth: {depth}")
 
@@ -1200,12 +1200,12 @@ def do_train():
         optimizer,
         start_factor=0.3,
         end_factor=1.0,
-        total_iters=effective_steps_per_epoch * 2,
+        total_iters=effective_steps_per_epoch,
     )
 
     cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=(EPOCHS - 2) * effective_steps_per_epoch,
+        T_max=(EPOCHS - 1) * effective_steps_per_epoch,
         # eta_min=base_enc_lr * 0.05,
         eta_min=base_enc_lr * 0.1,
         # eta_min=base_dec_lr * 0.1,
@@ -1215,7 +1215,7 @@ def do_train():
         optimizer,
         schedulers=[warmup, cosine],
         milestones=[
-            effective_steps_per_epoch * 2,
+            effective_steps_per_epoch,
         ],  # After first epoch switch to cosine
     )
 
