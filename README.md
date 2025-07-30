@@ -64,16 +64,8 @@ _Loss mask dropout for majority classes_: 20% in S0/S1, disabled from S2
 
 ## 3.1 Training plan
 
-### Height/AO - Start from scratch
-
-| Phase  | Crop | Epochs | Enc LR            | Dec LR | Optimizer | Scheduler                                                                         |
-| ------ | ---- | ------ | ----------------- | ------ | --------- | --------------------------------------------------------------------------------- |
-| **P0** | 256  | 8      | 1e‑4              | 2e‑4   | AdamW     | warmup linearLR 1 epoch, start_lr=0.3, cosine t_max=epochs-1,eta_min=`enc_lr*0.1` |
-| **P1** | 512  | 8      | 1e‑4 (LLRD 0.9^d) | 2e‑4   | AdamW     | same                                                                              |
-| **P2** | 768  | 14     | 8e‑5 (LLDR 0.9^d) | 1.6e‑4 | AdamW     | same                                                                              |
-| **P3** | 1024 | 5      | frozen            | 1.0e‑4 | AdamW     | same                                                                              |
-
-### Roughness/Metallic - Import weights from A4
+_Height/AO_ - Start from scratch
+_Roughness/Metallic_ - Import weights from A4
 
 | Phase  | Crop | Epochs | Enc LR            | Dec LR | Optimizer | Scheduler                                                                         |
 | ------ | ---- | ------ | ----------------- | ------ | --------- | --------------------------------------------------------------------------------- |
