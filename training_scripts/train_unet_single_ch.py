@@ -739,7 +739,7 @@ def calculate_rougness_loss(
     loss_edge = edge_aware_sobel_loss(prob, gt)
     epoch_data[key]["edge_loss"] += loss_edge.item()
 
-    loss_rough = l1_rough + 0.1 * ssim_rough_loss + 0.02 * loss_edge
+    loss_rough = l1_rough + 0.15 * ssim_rough_loss + 0.05 * loss_edge
     epoch_data[key]["total_loss"] += loss_rough.item()
 
     return loss_rough
