@@ -1294,6 +1294,7 @@ def do_train():
             if not USE_ACCUMULATION:
                 optimizer.zero_grad()
 
+            predicted_albedo = None
             with torch.no_grad():
                 with autocast(device_type=device.type):
                     #  Get Segoformer ouput for FiLM & masks
@@ -1310,14 +1311,18 @@ def do_train():
                         align_corners=False,
                     )
 
-                    predicted_albedo = unet_albedo(
-                        diffuse_and_normal, seg_feats
-                    ).detach()
+                    if UNET_MAP == "metallic" or UNET_MAP == "roughness":
+                        predicted_albedo = unet_albedo(
+                            diffuse_and_normal, seg_feats
+                        ).detach()
 
-            predicted_albedo = TF.normalize(
-                predicted_albedo, mean=IMAGENET_STANDARD_MEAN, std=IMAGENET_STANDARD_STD
-            )
-            predicted_albedo = predicted_albedo.to(device, non_blocking=True)
+            if predicted_albedo is not None:
+                predicted_albedo = TF.normalize(
+                    predicted_albedo,
+                    mean=IMAGENET_STANDARD_MEAN,
+                    std=IMAGENET_STANDARD_STD,
+                )
+                predicted_albedo = predicted_albedo.to(device, non_blocking=True)
 
             if UNET_MAP == "parallax" or UNET_MAP == "ao":
                 curvature = mean_curvature_map(normal)
@@ -1354,7 +1359,7 @@ def do_train():
 
                 input = torch.cat(
                     [
-                        predicted_albedo,
+                        predicted_albedo,  # type: ignore
                         normal,
                         final_mask,
                     ],
@@ -1443,6 +1448,7 @@ def do_train():
 
                 gt = gt.to(device, non_blocking=True)
 
+                predicted_albedo = None
                 with autocast(device_type=device.type):
                     #  Get Segoformer ouput for FiLM & masks
                     segformer_output = segformer(
@@ -1458,17 +1464,19 @@ def do_train():
                         align_corners=False,
                     )
 
-                    predicted_albedo = unet_albedo(
-                        diffuse_and_normal, seg_feats
-                    ).detach()
+                    if UNET_MAP == "metallic" or UNET_MAP == "roughness":
+                        predicted_albedo = unet_albedo(
+                            diffuse_and_normal, seg_feats
+                        ).detach()
 
-                predicted_albedo_orig = predicted_albedo
-                predicted_albedo = TF.normalize(
-                    predicted_albedo,
-                    mean=IMAGENET_STANDARD_MEAN,
-                    std=IMAGENET_STANDARD_STD,
-                )
-                predicted_albedo = predicted_albedo.to(device, non_blocking=True)
+                if predicted_albedo is not None:
+                    predicted_albedo_orig = predicted_albedo
+                    predicted_albedo = TF.normalize(
+                        predicted_albedo,
+                        mean=IMAGENET_STANDARD_MEAN,
+                        std=IMAGENET_STANDARD_STD,
+                    )
+                    predicted_albedo = predicted_albedo.to(device, non_blocking=True)
 
                 if UNET_MAP == "parallax" or UNET_MAP == "ao":
                     curvature = mean_curvature_map(normal)
@@ -1505,7 +1513,7 @@ def do_train():
 
                     input = torch.cat(
                         [
-                            predicted_albedo,
+                            predicted_albedo,  # type: ignore
                             normal,
                             final_mask,
                         ],
