@@ -17,3 +17,5 @@ skyrim_data_unet_parallax.json
 skyrim_data_unet_all.json
 matsynth_cache.json
 temp
+build
+dist
