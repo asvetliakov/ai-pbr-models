@@ -80,6 +80,8 @@ device = (
     else torch.device("cpu")
 )
 
+print(f"Using device: {device}")
+
 INPUT_DIR = Path(args.input_dir).resolve()
 BASE_OUTPUT_DIR = Path(args.output_dir).resolve()
 TEXCONV_PATH = Path(args.textconv_path).resolve()
