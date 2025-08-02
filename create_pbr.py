@@ -80,6 +80,14 @@ parser.add_argument(
     help="Maximum tile size for processing (default: 2048). Use 1024 if you don't have enough VRAM.",
 )
 
+parser.add_argument(
+    "--segformer_checkpoint",
+    type=str,
+    choices=["s3", "s4", "s4_alt"],
+    help="Segformer checkpoint to use for segmentation",
+    default="s3",
+)
+
 args = parser.parse_args()
 device = (
     torch.device("cuda")
@@ -96,6 +104,7 @@ OUTPUT_PNG = args.format.lower() == "png" or args.separate_maps
 SEPARATE_MAPS = args.separate_maps
 MAX_TILE_SIZE = args.max_tile_size
 WEIGHTS_DIR = Path(args.weights_dir).resolve()
+SEGFORMER_STAGE = args.segformer_checkpoint
 
 TEXCONV_ARGS_SRGB_PNG = [
     str(TEXCONV_PATH),
@@ -118,7 +127,7 @@ TEXCONV_ARGS_LINEAR_PNG = [
     "png",
     "-y",
 ]
-segformer_weights_path = WEIGHTS_DIR / "s3/segformer/best_model.pt"
+segformer_weights_path = WEIGHTS_DIR / f"{SEGFORMER_STAGE}/segformer/best_model.pt"
 unet_albedo_weights_path = WEIGHTS_DIR / "a4/unet_albedo/best_model.pt"
 unet_parallax_weights_path = WEIGHTS_DIR / "m3/unet_parallax/best_model.pt"
 unet_ao_weights_path = WEIGHTS_DIR / "m3/unet_ao/best_model.pt"
