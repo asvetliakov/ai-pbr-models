@@ -119,7 +119,7 @@ CROP_SIZE = 1024  # S3 Light - between 768-1024
 
 BATCH_SIZE_VALIDATION_SKYRIM = 1
 
-SKYRIM_PHOTOMETRIC = 0.0
+SKYRIM_PHOTOMETRIC = 0.4
 
 SKYRIM_CERAMIC_CROP_BIAS_CHANCE = 0
 SKYRIM_LEATHER_CROP_BIAS_CHANCE = 0
@@ -615,7 +615,7 @@ def is_norm_param(name, module):
 
 # Training loop
 def do_train():
-    EPOCHS = 6
+    EPOCHS = 8
 
     print(
         f"Starting training for {EPOCHS} epochs, on {STEPS_PER_EPOCH_TRAIN * BATCH_SIZE} samples, validation on {len(skyrim_validation_dataset)} samples."
@@ -632,9 +632,15 @@ def do_train():
         p.requires_grad = False
 
     # Unfreeze only last encoder block (block.3) + decoder
-    # for n, p in model.named_parameters():
-    #     if "decode_head." in n or ".encoder.block.3." in n:
-    #         p.requires_grad = True
+    for n, p in model.named_parameters():
+        if (
+            "decode_head." in n
+            or ".encoder.block.3." in n
+            or ".patch_embeddings." in n
+            or ".layer_norm." in n
+            or ".encoder.block.2" in n
+        ):
+            p.requires_grad = True
 
     for n, p in model.named_parameters():
         if "decode_head." in n:
@@ -677,25 +683,25 @@ def do_train():
 
     skyrim_train_iter = cycle(skyrim_train_loader)
 
-    LR_DEC = 1e-6
-    LR_ENC = 3e-7
+    LR_DEC = 1e-4
+    LR_ENC = 1e-5
     # WD = 1e-2
 
     # --- map every parameter to its encoder depth (None = decoder / head) ---
     gamma = 0.9
     depth_map = {}
 
-    # encoder_blocks = model.segformer.encoder.block  # type: ignore # list of 4 lists-of-MixFFNs
-    # for depth, blk in enumerate(encoder_blocks):  # type: ignore
-    #     for p in blk.parameters(recurse=True):
-    #         depth_map[id(p)] = depth
+    encoder_blocks = model.segformer.encoder.block  # type: ignore # list of 4 lists-of-MixFFNs
+    for depth, blk in enumerate(encoder_blocks):  # type: ignore
+        for p in blk.parameters(recurse=True):
+            depth_map[id(p)] = depth
 
-    # for i, pe in enumerate(model.segformer.encoder.patch_embeddings):  # type: ignore
-    #     for p in pe.parameters(recurse=True):
-    #         depth_map[id(p)] = i
-    # for i, ln in enumerate(model.segformer.encoder.layer_norm):  # type: ignore
-    #     for p in ln.parameters(recurse=True):
-    #         depth_map[id(p)] = i
+    for i, pe in enumerate(model.segformer.encoder.patch_embeddings):  # type: ignore
+        for p in pe.parameters(recurse=True):
+            depth_map[id(p)] = i
+    for i, ln in enumerate(model.segformer.encoder.layer_norm):  # type: ignore
+        for p in ln.parameters(recurse=True):
+            depth_map[id(p)] = i
 
     param_groups = {}  # key = (lr, wd) ➜ list(params)
 
@@ -763,7 +769,7 @@ def do_train():
     )
 
     cosine_stage1 = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=int((EPOCHS - 0.5) * effective_scheduler_steps), eta_min=1e-7
+        optimizer, T_max=int((EPOCHS - 0.5) * effective_scheduler_steps), eta_min=1e-6
     )
 
     scheduler = torch.optim.lr_scheduler.SequentialLR(

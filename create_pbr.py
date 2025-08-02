@@ -83,9 +83,9 @@ parser.add_argument(
 parser.add_argument(
     "--segformer_checkpoint",
     type=str,
-    choices=["s3", "s4", "s4_alt"],
+    choices=["s4", "s4_alt"],
     help="Segformer checkpoint to use for segmentation",
-    default="s3",
+    default="s4",
 )
 
 args = parser.parse_args()
@@ -449,12 +449,45 @@ def predirect_pbr_maps(
     albedo_img = albedo_img.convert("RGB")
     normal_img = normal_img.convert("RGB")
 
-    albedo_min = min(albedo_img.size)
+    original_size = albedo_img.size
+    downsample_factor = 1
+
+    if albedo_img.height != albedo_img.width:
+        padding = (
+            0,
+            0,
+            # Add right padding to make it square
+            (
+                albedo_img.height - albedo_img.width
+                if albedo_img.height > albedo_img.width
+                else 0
+            ),
+            # Add bottom padding to make it square
+            (
+                albedo_img.width - albedo_img.height
+                if albedo_img.width > albedo_img.height
+                else 0
+            ),
+        )
+        albedo_img = TF.pad(albedo_img, padding, fill=0)  # type: ignore
+        normal_img = TF.pad(normal_img, padding, fill=0)  # type: ignore
+
     # PBR maps have / 2 resolution so downscale if albedo is larger than 1024
-    if albedo_min > 1024:
+    if min(albedo_img.size) > 1024:
         albedo_img = albedo_img.resize(
             (albedo_img.width // 2, albedo_img.height // 2), Image.Resampling.LANCZOS
         )
+        downsample_factor = 2
+
+    # If original input was 8K it's still 4K now. Too much so downscale to max tile size
+    # Note we don't want to use tiling similar to albedo to produce roughness/metallic it in always all cases produces tiled roughness/metallic where one tile is different from another
+    if min(albedo_img.size) > MAX_TILE_SIZE:
+        factor = albedo_img.width // MAX_TILE_SIZE
+        albedo_img = albedo_img.resize(
+            (albedo_img.width // factor, albedo_img.height // factor),
+            Image.Resampling.LANCZOS,
+        )
+        downsample_factor *= factor
 
     if albedo_img.size != normal_img.size:
         normal_img = normal_img.resize(
@@ -481,195 +514,106 @@ def predirect_pbr_maps(
     poisson_coarse = poisson_coarse_from_normal(normal)
     mean_curvature = mean_curvature_map(normal)
 
-    W, H = albedo_img.size
-    tile_size = min(H, W)
-    if tile_size > MAX_TILE_SIZE:
-        tile_size = MAX_TILE_SIZE
+    # Use autocast for mixed precision to reduce memory usage
+    with torch.no_grad(), autocast(
+        enabled=device.type == "cuda",
+        device_type=device.type,
+    ):
+        albedo_segformer = albedo_segformer.to(device)
+        normal = normal.to(device)
+        poisson_coarse = poisson_coarse.to(device)
+        mean_curvature = mean_curvature.to(device)
 
-    overlap = 0
-    xs = [0]
-    ys = [0]
+        # Get segformer mask/probabilities
+        segformer_input = torch.cat((albedo_segformer, normal), dim=1)
+        setformer_output = segformer(segformer_input, output_hidden_states=True)
+        segformer_pred = setformer_output.logits
+        seg_feats = setformer_output.hidden_states[-1]  # (B, C, H/4, W/4)
 
-    # Use tiling if image is large than tile size or not square
-    if W != H or tile_size < min(H, W):
-        # 1024 -> 128px , 2048 -> 256px
-        overlap = int(tile_size / 8)
-        stride = tile_size - overlap
-        # compute start indices along each axis
-        xs = list(range(0, W - tile_size + 1, stride))
-        ys = list(range(0, H - tile_size + 1, stride))
-        # ensure final tile reaches edge
-        if xs[-1] + tile_size < W:
-            xs.append(W - tile_size)
-        if ys[-1] + tile_size < H:
-            ys.append(H - tile_size)
+        segformer_pred: torch.Tensor = torch.nn.functional.interpolate(
+            segformer_pred,
+            size=albedo_segformer.shape[2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        seg_probs = F.softmax(segformer_pred, dim=1)
+        # Hard confidence gating to avoid ambiguous signals
+        max_probs, max_indices = torch.max(seg_probs, dim=1, keepdim=True)
+        one_hot_mask = torch.zeros_like(seg_probs)
+        one_hot_mask.scatter_(1, max_indices, 1)
 
-    # Create output tensors on CPU to save GPU memory, move tiles to GPU as needed
-    mask_output = torch.zeros(H, W)
-    parallax_output = torch.zeros(1, 1, H, W)  # (B, C, H, W)
-    ao_output = torch.zeros(1, 1, H, W)  # (B, C, H, W)
-    metallic_output = torch.zeros(1, 1, H, W)  # (B, C, H, W)
-    roughness_output = torch.zeros(1, 1, H, W)  # (B, C, H, W)
-    weight_1ch = torch.zeros_like(parallax_output)  # (B, C, H, W)
+        # Use lower confidence threshold but add explicit non-metal suppression
+        confidence_thresh = 0.5
+        high_conf_mask = (max_probs > confidence_thresh).float()
+        final_mask = one_hot_mask * high_conf_mask
 
-    # Create blending mask (raised cosine window) - keep on CPU initially
-    ramp = torch.linspace(0, 1, overlap)
-    window1d = torch.ones(tile_size)
+        # Run unet for parallax
+        parallax_ao_input = torch.cat((normal, mean_curvature, poisson_coarse), dim=1)
+        predicted_parallax = unet_parallax(parallax_ao_input, seg_feats)
 
-    if overlap > 0:
-        window1d[:overlap] = ramp
-        window1d[-overlap:] = ramp.flip(0)
+        # Run unet for AO
+        predicted_ao = unet_ao(parallax_ao_input, seg_feats)
 
-    # Make 2d blending mask
-    w2d = window1d[None, None, :, None] * window1d[None, None, None, :]
+        # Run unet for metallic
+        metallic_roughness_input = torch.cat(
+            (albedo_segformer, normal, final_mask),
+            dim=1,
+        )
+        predicted_metallic = unet_metallic(metallic_roughness_input, seg_feats)
 
-    for y in ys:
-        for x in xs:
-            # Use autocast for mixed precision to reduce memory usage
-            with torch.no_grad(), autocast(
-                enabled=device.type == "cuda",
-                device_type=device.type,
-            ):
-                tile_albedo = TF.crop(albedo, y, x, tile_size, tile_size).to(device)
-                tile_albedo_segformer = TF.crop(
-                    albedo_segformer, y, x, tile_size, tile_size
-                ).to(device)
-                tile_normal = TF.crop(normal, y, x, tile_size, tile_size).to(device)
-                tile_poisson = TF.crop(poisson_coarse, y, x, tile_size, tile_size).to(
-                    device
-                )
-                tile_mean_curvature = TF.crop(
-                    mean_curvature, y, x, tile_size, tile_size
-                ).to(device)
+        # Run unet for roughness
+        predicted_roughness = unet_roughness(metallic_roughness_input, seg_feats)
 
-                # Get segformer mask/probabilities
-                segformer_input = torch.cat((tile_albedo_segformer, tile_normal), dim=1)
-                setformer_output = segformer(segformer_input, output_hidden_states=True)
-                segformer_pred = setformer_output.logits
-                seg_feats = setformer_output.hidden_states[-1]  # (B, C, H/4, W/4)
+        # Move predictions back to CPU and convert to float32 to save GPU memory
+        predicted_parallax = predicted_parallax.cpu().float()
+        predicted_ao = predicted_ao.cpu().float()
+        predicted_metallic = predicted_metallic.cpu().float()
+        predicted_roughness = predicted_roughness.cpu().float()
+        # mask_visual = torch.argmax(final_mask, dim=1).squeeze(0).cpu()
 
-                segformer_pred: torch.Tensor = torch.nn.functional.interpolate(
-                    segformer_pred,
-                    size=tile_albedo_segformer.shape[2:],
-                    mode="bilinear",
-                    align_corners=False,
-                )
-                seg_probs = F.softmax(segformer_pred, dim=1)
-                # Hard confidence gating to avoid ambiguous signals
-                max_probs, max_indices = torch.max(seg_probs, dim=1, keepdim=True)
-                one_hot_mask = torch.zeros_like(seg_probs)
-                one_hot_mask.scatter_(1, max_indices, 1)
+        # Explicit memory cleanup after each tile
+        del (
+            segformer_input,
+            setformer_output,
+            segformer_pred,
+            seg_feats,
+            seg_probs,
+            max_probs,
+            max_indices,
+            one_hot_mask,
+            high_conf_mask,
+            final_mask,
+            parallax_ao_input,
+            metallic_roughness_input,
+            # mask_visual,
+        )
+        torch.cuda.empty_cache() if device.type == "cuda" else None
 
-                # Use lower confidence threshold but add explicit non-metal suppression
-                confidence_thresh = 0.5
-                high_conf_mask = (max_probs > confidence_thresh).float()
-                final_mask = one_hot_mask * high_conf_mask
-
-                # Run unet for parallax
-                parallax_ao_input = torch.cat(
-                    (tile_normal, tile_mean_curvature, tile_poisson), dim=1
-                )
-                predicted_parallax = unet_parallax(parallax_ao_input, seg_feats)
-
-                # Run unet for AO
-                predicted_ao = unet_ao(parallax_ao_input, seg_feats)
-
-                # Run unet for metallic
-                metallic_roughness_input = torch.cat(
-                    (tile_albedo, tile_normal, final_mask),
-                    dim=1,
-                )
-                predicted_metallic = unet_metallic(metallic_roughness_input, seg_feats)
-
-                # Run unet for roughness
-                predicted_roughness = unet_roughness(
-                    metallic_roughness_input, seg_feats
-                )
-
-                # Move predictions back to CPU and convert to float32 to save GPU memory
-                predicted_parallax = predicted_parallax.cpu().float()
-                predicted_ao = predicted_ao.cpu().float()
-                predicted_metallic = predicted_metallic.cpu().float()
-                predicted_roughness = predicted_roughness.cpu().float()
-                mask_visual = torch.argmax(final_mask, dim=1).squeeze(0).cpu()
-
-                if overlap > 0:
-                    w2d_cpu = w2d.float()
-                    parallax_output[:, :, y : y + tile_size, x : x + tile_size] += (
-                        predicted_parallax * w2d_cpu
-                    )
-                    ao_output[:, :, y : y + tile_size, x : x + tile_size] += (
-                        predicted_ao * w2d_cpu
-                    )
-                    metallic_output[:, :, y : y + tile_size, x : x + tile_size] += (
-                        predicted_metallic * w2d_cpu
-                    )
-                    roughness_output[:, :, y : y + tile_size, x : x + tile_size] += (
-                        predicted_roughness * w2d_cpu
-                    )
-
-                    weight_1ch[:, :, y : y + tile_size, x : x + tile_size] += w2d_cpu
-                else:
-                    parallax_output[
-                        :, :, y : y + tile_size, x : x + tile_size
-                    ] += predicted_parallax
-                    ao_output[
-                        :, :, y : y + tile_size, x : x + tile_size
-                    ] += predicted_ao
-                    metallic_output[
-                        :, :, y : y + tile_size, x : x + tile_size
-                    ] += predicted_metallic
-                    roughness_output[
-                        :, :, y : y + tile_size, x : x + tile_size
-                    ] += predicted_roughness
-
-                    weight_1ch[:, :, y : y + tile_size, x : x + tile_size] += 1.0
-
-                # Append mask to output
-                mask_output[y : y + tile_size, x : x + tile_size] = mask_visual
-
-                # Explicit memory cleanup after each tile
-                del (
-                    tile_normal,
-                    tile_poisson,
-                    tile_mean_curvature,
-                    segformer_input,
-                    setformer_output,
-                    segformer_pred,
-                    seg_feats,
-                    seg_probs,
-                    max_probs,
-                    max_indices,
-                    one_hot_mask,
-                    high_conf_mask,
-                    final_mask,
-                    parallax_ao_input,
-                    predicted_parallax,
-                    predicted_ao,
-                    metallic_roughness_input,
-                    predicted_metallic,
-                    predicted_roughness,
-                    mask_visual,
-                )
-                torch.cuda.empty_cache() if device.type == "cuda" else None
-
-    # Normalize output
-    if overlap > 0:
-        parallax_output = parallax_output / weight_1ch.clamp(min=1e-6)
-        ao_output = ao_output / weight_1ch.clamp(min=1e-6)
-        metallic_output = metallic_output / weight_1ch.clamp(min=1e-6)
-        roughness_output = roughness_output / weight_1ch.clamp(min=1e-6)
-
-    parallax_image = TF.to_pil_image(
-        torch.sigmoid(parallax_output).squeeze(0).clamp(0, 1)
+    # If padded crop to original size
+    final_size = (
+        original_size[0] // downsample_factor,
+        original_size[1] // downsample_factor,
     )
-    ao_image = TF.to_pil_image(torch.sigmoid(ao_output).squeeze(0).clamp(0, 1))
-    metallic_image = TF.to_pil_image(
-        torch.sigmoid(metallic_output).squeeze(0).clamp(0, 1)
+
+    parallax_image: Image.Image = TF.to_pil_image(
+        torch.sigmoid(predicted_parallax).squeeze(0).clamp(0, 1)
     )
-    roughness_image = TF.to_pil_image(
-        torch.sigmoid(roughness_output).squeeze(0).clamp(0, 1)
+    parallax_image = parallax_image.crop((0, 0, final_size[0], final_size[1]))
+
+    ao_image: Image.Image = TF.to_pil_image(
+        torch.sigmoid(predicted_ao).squeeze(0).clamp(0, 1)
     )
+    ao_image = ao_image.crop((0, 0, final_size[0], final_size[1]))
+
+    metallic_image: Image.Image = TF.to_pil_image(
+        torch.sigmoid(predicted_metallic).squeeze(0).clamp(0, 1)
+    )
+    metallic_image = metallic_image.crop((0, 0, final_size[0], final_size[1]))
+
+    roughness_image: Image.Image = TF.to_pil_image(
+        torch.sigmoid(predicted_roughness).squeeze(0).clamp(0, 1)
+    )
+    roughness_image = roughness_image.crop((0, 0, final_size[0], final_size[1]))
 
     return (
         parallax_image,

@@ -56,26 +56,15 @@ Class weights for training dataset:
 Min/Max weight: 0.6591277122497559 2.1970930099487305
 Oversample factor for heaviest image: 3.333334297915562
 
------------------------ Segformer: Best Model Confusion Matrix (S3 Epoch 2) ----------------------
-
-Note: ground -> stone confusion can be beneficial
+----------------------- Segformer: Best Model Confusion Matrix (S4 Epoch 3) ----------------------
 
 True\Pred       fabric    ground   leather     metal     stone      wood
-fabric           89.4%      0.0%      8.4%      0.3%      0.6%      1.2%
-ground            0.0%     85.1%      0.0%      0.0%     12.1%      2.8%
-leather           2.8%      0.0%     92.3%      3.8%      0.8%      0.2%
-metal             0.6%      0.0%      5.7%     89.9%      0.9%      3.0%
-stone             0.0%      0.6%      1.8%      0.4%     97.2%      0.0%
-wood              0.1%      0.0%      0.8%      3.4%      2.9%     92.9%
-
-Alternative S4 epoch 3
-True\Pred       fabric    ground   leather     metal     stone      wood
-fabric           90.0%      0.0%      8.1%      0.2%      0.6%      1.1%
-ground            0.0%     91.6%      0.0%      0.0%      5.6%      2.8%
-leather           3.0%      0.0%     92.6%      3.6%      0.4%      0.3%
-metal             1.0%      0.0%      6.8%     88.3%      0.6%      3.3%
-stone             0.0%      3.6%      1.9%      0.6%     93.9%      0.1%
-wood              0.2%      0.0%      0.8%      3.3%      2.5%     93.2%
+fabric           90.9%      0.0%      6.8%      0.2%      0.8%      1.3%
+ground            0.0%     94.0%      0.0%      0.0%      3.2%      2.8%
+leather           4.8%      0.0%     91.2%      3.9%      0.0%      0.2%
+metal             0.9%      0.0%      4.7%     91.4%      0.6%      2.3%
+stone             0.0%      0.7%      1.8%      2.2%     95.2%      0.1%
+wood              0.2%      0.0%      0.7%      3.3%      2.4%     93.5%
 
 
 ----------------------- Unet-Albedo dataset info ----------------------
