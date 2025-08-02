@@ -38,6 +38,13 @@ parser.add_argument(
 )
 
 parser.add_argument(
+    "--weights_dir",
+    type=str,
+    default=str(WEIGHTS_DIR),
+    help="Directory containing model weights",
+)
+
+parser.add_argument(
     "--cpu",
     type=bool,
     default=False,
@@ -88,6 +95,7 @@ TEXCONV_PATH = Path(args.textconv_path).resolve()
 OUTPUT_PNG = args.format.lower() == "png" or args.separate_maps
 SEPARATE_MAPS = args.separate_maps
 MAX_TILE_SIZE = args.max_tile_size
+WEIGHTS_DIR = Path(args.weights_dir).resolve()
 
 TEXCONV_ARGS_SRGB_PNG = [
     str(TEXCONV_PATH),
