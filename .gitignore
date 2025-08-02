@@ -12,6 +12,8 @@ skyrim_processed_for_maps
 skyrim_cache_all.json
 skyrim_cache_pbr.json
 skyrim_data_segformer.json
+skyrim_data_segformer_new.json
+skyrim_data_segformer_skyrim_only.json
 skyrim_data_unet_albedo.json
 skyrim_data_unet_parallax.json
 skyrim_data_unet_all.json
