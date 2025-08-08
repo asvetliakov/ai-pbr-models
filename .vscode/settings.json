@@ -1,0 +1,16 @@
+{
+    // Point CMake Tools at the CMake project
+    "cmake.sourceDirectory": "C:/Users/asvet/ai/cpp_gui",
+
+    // Always use CMakePresets.json for configure/build
+    "cmake.useCMakePresets": "always",
+
+    // Default presets (you can switch in the status bar: CMake: [Select Configure Preset])
+    "cmake.configurePreset": "windows-vs2022-vcpkg",
+    "cmake.buildPreset": "build-vs2022",
+    "files.associations": {
+        "xstring": "cpp",
+        "filesystem": "cpp",
+        "chrono": "cpp"
+    }
+}

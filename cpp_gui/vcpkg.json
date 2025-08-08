@@ -1,0 +1,10 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+    "name": "ai-pbr-gui",
+    "version-string": "0.1.0",
+    "builtin-baseline": "ed94c3859501517cee7ab3a8f2f0397b9bc1bea3",
+    "dependencies": [
+        { "name": "stb" },
+        { "name": "opencv", "default-features": false }
+    ]
+}

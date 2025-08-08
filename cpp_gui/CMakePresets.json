@@ -1,0 +1,43 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "windows-ninja-vcpkg",
+            "displayName": "Windows (Ninja, vcpkg)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_TOOLCHAIN_FILE": "${env.VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_TARGET_TRIPLET": "x64-windows",
+                "Torch_DIR": "${env.TORCH_DIR}"
+            }
+        },
+        {
+            "name": "windows-vs2022-vcpkg",
+            "displayName": "Windows (VS 2022, vcpkg)",
+            "generator": "Visual Studio 17 2022",
+            "architecture": {
+                "value": "x64"
+            },
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "${env.VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_TARGET_TRIPLET": "x64-windows",
+                "Torch_DIR": "${env.TORCH_DIR}"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "build-ninja",
+            "configurePreset": "windows-ninja-vcpkg",
+            "configuration": "Release"
+        },
+        {
+            "name": "build-vs2022",
+            "configurePreset": "windows-vs2022-vcpkg",
+            "configuration": "Release"
+        }
+    ]
+}

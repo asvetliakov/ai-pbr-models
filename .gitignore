@@ -21,3 +21,6 @@ matsynth_cache.json
 temp
 build
 dist
+vcpkg_installed
+weights_ts
+test_input
