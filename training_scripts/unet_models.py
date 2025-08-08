@@ -34,8 +34,9 @@ class LightweightSelfAttention(nn.Module):
 
         # Always use pooling for efficiency and regularization
         if H > 24 or W > 24:
-            pool_size = H // 24 + 1 if H > 24 else 1
-            x_pool = F.avg_pool2d(x, pool_size)
+            # pool_size = H // 24 + 1 if H > 24 else 1
+            # x_pool = F.avg_pool2d(x, pool_size)
+            x_pool = F.adaptive_avg_pool2d(x, (21, 21))
             _, _, H_p, W_p = x_pool.shape
 
             q = self.query(x_pool).view(B, -1, H_p * W_p).permute(0, 2, 1)
@@ -47,7 +48,9 @@ class LightweightSelfAttention(nn.Module):
 
             out = torch.bmm(v, attn.permute(0, 2, 1)).view(B, -1, H_p, W_p)
             out = self.out_proj(out)
-            out = F.interpolate(out, size=(H, W), mode="bilinear", align_corners=False)
+            out = F.interpolate(
+                out, size=(x.size(-2), x.size(-1)), mode="bilinear", align_corners=False
+            )
         else:
             q = self.query(x).view(B, -1, H * W).permute(0, 2, 1)
             k = self.key(x).view(B, -1, H * W)
@@ -258,14 +261,20 @@ class _UNetBackbone(nn.Module):
         if self.film is not None and cond is not None:
             # up‑sample cond to bottleneck spatial size
             cond = F.interpolate(
-                cond, size=bottleneck.shape[-2:], mode="bilinear", align_corners=False
+                cond,
+                size=(bottleneck.size(-2), bottleneck.size(-1)),
+                mode="bilinear",
+                align_corners=False,
             )
             bottleneck = self.film(bottleneck, cond)
 
         # --- Late-fusion mask FiLM ---
         if self.mask_film is not None and gray_mask is not None:
             gm = F.interpolate(
-                gray_mask, bottleneck.shape[-2:], mode="bilinear", align_corners=False
+                gray_mask,
+                size=(bottleneck.size(-2), bottleneck.size(-1)),
+                mode="bilinear",
+                align_corners=False,
             )
             bottleneck = self.mask_film(bottleneck, gm)
 
