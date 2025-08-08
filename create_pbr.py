@@ -519,6 +519,7 @@ def predirect_pbr_maps(
         enabled=device.type == "cuda",
         device_type=device.type,
     ):
+        albedo = albedo.to(device)
         albedo_segformer = albedo_segformer.to(device)
         normal = normal.to(device)
         poisson_coarse = poisson_coarse.to(device)
@@ -556,7 +557,7 @@ def predirect_pbr_maps(
 
         # Run unet for metallic
         metallic_roughness_input = torch.cat(
-            (albedo_segformer, normal, final_mask),
+            (albedo, normal, final_mask),
             dim=1,
         )
         predicted_metallic = unet_metallic(metallic_roughness_input, seg_feats)
