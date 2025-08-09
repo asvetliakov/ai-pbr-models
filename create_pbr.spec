@@ -26,10 +26,7 @@ for dep in deps_needing_metadata:
 a = Analysis(
     ['create_pbr.py'],
     pathex=[spec_root],
-    binaries=[
-        # Include texconv.exe if it's in the same directory
-        # ('texconv.exe', '.') if os.path.exists(os.path.join(spec_root, 'texconv.exe')) else None,
-    ],
+    binaries=[],
     datas=[
         # Include training_scripts directory for the models (lightweight Python files)
         ('training_scripts', 'training_scripts'),
@@ -107,7 +104,6 @@ a = Analysis(
         'jupyter',
         'notebook',
         'IPython',
-        'tkinter',
         'PyQt5',
         'PyQt6',
         'PySide2',
@@ -124,20 +120,18 @@ a.binaries = [x for x in a.binaries if x is not None]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# Build as onedir to avoid per-run unpacking (files are laid out in dist/create_pbr/)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='create_pbr',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,  # Enable UPX compression to reduce file size
     upx_exclude=[],
-    runtime_tmpdir=None,
     console=True,  # Keep console for debugging
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -145,4 +139,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=None,  # You can add an icon file path here
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='create_pbr',
 )
