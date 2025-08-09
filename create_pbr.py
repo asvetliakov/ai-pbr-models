@@ -27,7 +27,9 @@ from training_scripts.segformer_6ch import create_segformer
 from training_scripts.unet_models import UNetAlbedo, UNetSingleChannel
 
 # Basic logging setup
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
+)
 
 # Resolve base directory correctly for both script and PyInstaller executable runs.
 if getattr(sys, "frozen", False):
@@ -449,9 +451,13 @@ try:
     unet_parallax_weights = torch.load(unet_parallax_weights_path, map_location=device)
     unet_ao_weights = torch.load(unet_ao_weights_path, map_location=device)
     unet_metallic_weights = torch.load(unet_metallic_weights_path, map_location=device)
-    unet_roughness_weights = torch.load(unet_roughness_weights_path, map_location=device)
+    unet_roughness_weights = torch.load(
+        unet_roughness_weights_path, map_location=device
+    )
 except Exception:
-    logging.exception("Failed to load model weights. Check --weights_dir and file presence.")
+    logging.exception(
+        "Failed to load model weights. Check --weights_dir and file presence."
+    )
     maybe_pause_on_exit("Failed to load weights.")
     sys.exit(3)
 
@@ -812,7 +818,9 @@ def predirect_pbr_maps(
             Image.Resampling.LANCZOS,
         )
         downsample_factor *= factor
-        logging.info(f"Downscaling to respect MAX_TILE_SIZE={MAX_TILE_SIZE} (factor={factor})")
+        logging.info(
+            f"Downscaling to respect MAX_TILE_SIZE={MAX_TILE_SIZE} (factor={factor})"
+        )
 
     if albedo_img.size != normal_img.size:
         logging.info(f"Resizing normal to {albedo_img.size} to match albedo")
@@ -1064,9 +1072,7 @@ for normal_path in file_list:
         albedo_img.save(albedo_png)
         rmaos_image.save(rmaos_png)
         parallax_img.save(parallax_png)
-        logging.info(
-            f"Saved: {albedo_png.name}, {rmaos_png.name}, {parallax_png.name}"
-        )
+        logging.info(f"Saved: {albedo_png.name}, {rmaos_png.name}, {parallax_png.name}")
 
     # Re-save normal map since we need to drop alpha channel here
     normal_img.save(normal_png)
