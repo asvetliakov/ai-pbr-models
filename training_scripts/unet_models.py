@@ -21,9 +21,6 @@ class LightweightSelfAttention(nn.Module):
         self.value = nn.Conv2d(channels, reduced_ch, 1, bias=False)
         self.out_proj = nn.Conv2d(reduced_ch, channels, 1, bias=False)
 
-        # Precompute scale for attention (TorchScript friendly)
-        self.scale = math.sqrt(reduced_ch)
-
         # Start with very small influence
         self.gamma = nn.Parameter(torch.zeros(1))
         self.dropout = nn.Dropout2d(dropout)
@@ -46,7 +43,7 @@ class LightweightSelfAttention(nn.Module):
             k = self.key(x_pool).view(B, -1, H_p * W_p)
             v = self.value(x_pool).view(B, -1, H_p * W_p)
 
-            attn = torch.bmm(q, k) / self.scale
+            attn = torch.bmm(q, k) / math.sqrt(q.size(-1))
             attn = F.softmax(attn, dim=-1)
 
             out = torch.bmm(v, attn.permute(0, 2, 1)).view(B, -1, H_p, W_p)
@@ -59,7 +56,7 @@ class LightweightSelfAttention(nn.Module):
             k = self.key(x).view(B, -1, H * W)
             v = self.value(x).view(B, -1, H * W)
 
-            attn = torch.bmm(q, k) / self.scale
+            attn = torch.bmm(q, k) / math.sqrt(q.size(-1))
             attn = F.softmax(attn, dim=-1)
 
             out = torch.bmm(v, attn.permute(0, 2, 1)).view(B, -1, H, W)
