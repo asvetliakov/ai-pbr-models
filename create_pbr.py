@@ -3,6 +3,8 @@ import sys
 import os
 import torch
 import json
+import logging
+import time
 from torchvision.transforms import functional as TF
 import torch.nn.functional as F
 from torch.amp.autocast_mode import autocast
@@ -23,6 +25,9 @@ import tkinter.font as tkfont
 from training_scripts.class_materials import CLASS_LIST, CLASS_PALETTE
 from training_scripts.segformer_6ch import create_segformer
 from training_scripts.unet_models import UNetAlbedo, UNetSingleChannel
+
+# Basic logging setup
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
 # Resolve base directory correctly for both script and PyInstaller executable runs.
 if getattr(sys, "frozen", False):
@@ -121,6 +126,30 @@ def ensure_console():
             ctypes.windll.kernel32.AllocConsole()
             sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
             sys.stderr = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+            try:
+                sys.stdin = open("CONIN$", "r", encoding="utf-8", buffering=1)
+            except Exception:
+                pass
+            globals()["_CONSOLE_WAS_ALLOCATED"] = True
+    except Exception:
+        pass
+
+
+# Track if we created a console window
+_CONSOLE_WAS_ALLOCATED = False
+
+
+def maybe_pause_on_exit(summary: str | None = None) -> None:
+    """If we allocated a console, keep it open so user can read the logs."""
+    try:
+        if summary:
+            logging.info(summary)
+        if os.name == "nt" and globals().get("_CONSOLE_WAS_ALLOCATED", False):
+            print("\nPress Enter to exit...")
+            try:
+                input()
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -365,8 +394,7 @@ device = (
     if not args.cpu and torch.cuda.is_available()
     else torch.device("cpu")
 )
-
-print(f"Using device: {device}")
+logging.info(f"Using device: {device}")
 
 INPUT_DIR = Path(args.input_dir).resolve()
 BASE_OUTPUT_DIR = Path(args.output_dir).resolve()
@@ -382,10 +410,8 @@ CREATE_JSONS = False if SEPARATE_MAPS else args.create_jsons
 # Validate input structure and compute scan root
 TEXTURES_DIR = INPUT_DIR / "textures"
 if not TEXTURES_DIR.is_dir():
-    print(
-        f"Error: input_dir '{INPUT_DIR}' must contain a 'textures' folder.",
-        file=sys.stderr,
-    )
+    logging.error(f"input_dir '{INPUT_DIR}' must contain a 'textures' folder.")
+    maybe_pause_on_exit("Aborted due to invalid input directory structure.")
     sys.exit(2)
 
 TEXCONV_ARGS_SRGB_PNG = [
@@ -416,12 +442,18 @@ unet_ao_weights_path = WEIGHTS_DIR / "m3/unet_ao/best_model.pt"
 unet_metallic_weights_path = WEIGHTS_DIR / "m3/unet_metallic/best_model.pt"
 unet_roughness_weights_path = WEIGHTS_DIR / "m3/unet_roughness/best_model.pt"
 
-segformer_weights = torch.load(segformer_weights_path, map_location=device)
-unet_albedo_weights = torch.load(unet_albedo_weights_path, map_location=device)
-unet_parallax_weights = torch.load(unet_parallax_weights_path, map_location=device)
-unet_ao_weights = torch.load(unet_ao_weights_path, map_location=device)
-unet_metallic_weights = torch.load(unet_metallic_weights_path, map_location=device)
-unet_roughness_weights = torch.load(unet_roughness_weights_path, map_location=device)
+try:
+    logging.info("Loading model weights...")
+    segformer_weights = torch.load(segformer_weights_path, map_location=device)
+    unet_albedo_weights = torch.load(unet_albedo_weights_path, map_location=device)
+    unet_parallax_weights = torch.load(unet_parallax_weights_path, map_location=device)
+    unet_ao_weights = torch.load(unet_ao_weights_path, map_location=device)
+    unet_metallic_weights = torch.load(unet_metallic_weights_path, map_location=device)
+    unet_roughness_weights = torch.load(unet_roughness_weights_path, map_location=device)
+except Exception:
+    logging.exception("Failed to load model weights. Check --weights_dir and file presence.")
+    maybe_pause_on_exit("Failed to load weights.")
+    sys.exit(3)
 
 segformer = create_segformer(
     num_labels=len(CLASS_LIST),
@@ -601,7 +633,7 @@ def predict_albedo(diffuse_img: Image.Image, normal_img: Image.Image) -> Image.I
     # Normalize diffuse & normal image to be the same resolution, use diffuse as base
     W, H = diffuse_img.size
     if normal_img.size != (W, H):
-        # print(f"Resizing normal from {normal_img.size} to {(W, H)}")
+        logging.info(f"Resizing normal from {normal_img.size} to {(W, H)}")
         normal_img = normal_img.resize((W, H), Image.Resampling.BILINEAR)
         normal_img = normalize_normal_map(normal_img)
 
@@ -653,6 +685,12 @@ def predict_albedo(diffuse_img: Image.Image, normal_img: Image.Image) -> Image.I
 
     # Make 2d blending mask
     w2d = window1d[None, None, :, None] * window1d[None, None, None, :]
+
+    num_tiles = len(xs) * len(ys)
+    if num_tiles > 1:
+        logging.info(
+            f"Albedo tiling: tile_size={tile_size}, overlap={overlap}, tiles={num_tiles}"
+        )
 
     for y in ys:
         for x in xs:
@@ -751,6 +789,9 @@ def predirect_pbr_maps(
                 else 0
             ),
         )
+        logging.info(
+            f"Padding to square: pad_right={padding[2]}, pad_bottom={padding[3]}"
+        )
         albedo_img = TF.pad(albedo_img, padding, fill=0)  # type: ignore
         normal_img = TF.pad(normal_img, padding, fill=0)  # type: ignore
 
@@ -760,6 +801,7 @@ def predirect_pbr_maps(
             (albedo_img.width // 2, albedo_img.height // 2), Image.Resampling.LANCZOS
         )
         downsample_factor = 2
+        logging.info("Downscaling PBR base to 1/2 (min side > 1024)")
 
     # If original input was 8K it's still 4K now. Too much so downscale to max tile size
     # Note we don't want to use tiling similar to albedo to produce roughness/metallic it in always all cases produces tiled roughness/metallic where one tile is different from another
@@ -770,8 +812,10 @@ def predirect_pbr_maps(
             Image.Resampling.LANCZOS,
         )
         downsample_factor *= factor
+        logging.info(f"Downscaling to respect MAX_TILE_SIZE={MAX_TILE_SIZE} (factor={factor})")
 
     if albedo_img.size != normal_img.size:
+        logging.info(f"Resizing normal to {albedo_img.size} to match albedo")
         normal_img = normal_img.resize(
             (albedo_img.width, albedo_img.height), Image.Resampling.BILINEAR
         )
@@ -796,6 +840,7 @@ def predirect_pbr_maps(
     poisson_coarse = poisson_coarse_from_normal(normal)
     mean_curvature = mean_curvature_map(normal)
 
+    logging.info("Running segmentation + UNets for PBR maps...")
     # Use autocast for mixed precision to reduce memory usage
     with torch.no_grad(), autocast(
         enabled=device.type == "cuda",
@@ -898,6 +943,7 @@ def predirect_pbr_maps(
     )
     roughness_image = roughness_image.crop((0, 0, final_size[0], final_size[1]))
 
+    logging.info("PBR inference complete")
     return (
         parallax_image,
         ao_image,
@@ -907,18 +953,27 @@ def predirect_pbr_maps(
 
 
 # Find and process normal + diffuse pairs inside 'textures'
-for normal_path in TEXTURES_DIR.glob("**/*_n.dds"):
+file_list = sorted(TEXTURES_DIR.glob("**/*_n.dds"))
+total_found = len(file_list)
+processed_ok = 0
+processed_fail = 0
+skipped_missing_diffuse = 0
+
+logging.info(f"Scanning '{TEXTURES_DIR}' for normal maps: found {total_found}")
+
+for normal_path in file_list:
     diffuse_path = normal_path.with_name(normal_path.name.replace("_n.dds", "_d.dds"))
     if not diffuse_path.exists():
         diffuse_path = normal_path.with_name(normal_path.name.replace("_n.dds", ".dds"))
 
     if not diffuse_path.exists():
-        print(f"Skipping {normal_path} - corresponding diffuse map not found.")
+        logging.warning(f"Skipping {normal_path} - diffuse not found (_d.dds or .dds)")
+        skipped_missing_diffuse += 1
         continue
 
-    print(f"Processing:")
-    print(f"  Normal Map: {normal_path}")
-    print(f"  Diffuse Map: {diffuse_path}")
+    logging.info("Processing pair:")
+    logging.info(f"  Normal:  {normal_path}")
+    logging.info(f"  Diffuse: {diffuse_path}")
 
     input_relative_path = normal_path.relative_to(TEXTURES_DIR)
     output_dir = OUTPUT_DIR / input_relative_path.parent
@@ -928,8 +983,13 @@ for normal_path in TEXTURES_DIR.glob("**/*_n.dds"):
     diffuse_args = TEXCONV_ARGS_SRGB_PNG + ["-o", str(output_dir), str(diffuse_path)]
     normal_args = TEXCONV_ARGS_LINEAR_PNG + ["-o", str(output_dir), str(normal_path)]
 
-    run(diffuse_args, check=True, stdout=DEVNULL, stderr=DEVNULL)
-    run(normal_args, check=True, stdout=DEVNULL, stderr=DEVNULL)
+    try:
+        run(diffuse_args, check=True, stdout=DEVNULL, stderr=DEVNULL)
+        run(normal_args, check=True, stdout=DEVNULL, stderr=DEVNULL)
+    except Exception:
+        logging.exception("texconv failed; skipping this pair")
+        processed_fail += 1
+        continue
 
     basename = normal_path.stem.replace("_n", "")
     diffuse_basename = diffuse_path.stem
@@ -951,12 +1011,23 @@ for normal_path in TEXTURES_DIR.glob("**/*_n.dds"):
     diffuse_png.unlink(missing_ok=True)
     normal_png.unlink(missing_ok=True)
 
-    print("  ...Generating Albedo")
-    albedo_img = predict_albedo(diffuse_img, normal_img)
-    print("  ...Generating PBR Maps")
-    parallax_img, ao_img, metallic_img, roughness_img = predirect_pbr_maps(
-        albedo_img, normal_img
-    )
+    try:
+        t0 = time.perf_counter()
+        logging.info("Generating Albedo...")
+        albedo_img = predict_albedo(diffuse_img, normal_img)
+        t1 = time.perf_counter()
+        logging.info(f"Albedo generated in {t1 - t0:.2f}s")
+
+        logging.info("Generating PBR maps...")
+        parallax_img, ao_img, metallic_img, roughness_img = predirect_pbr_maps(
+            albedo_img, normal_img
+        )
+        t2 = time.perf_counter()
+        logging.info(f"PBR maps generated in {t2 - t1:.2f}s")
+    except Exception:
+        logging.exception("Model inference failed; skipping this pair")
+        processed_fail += 1
+        continue
 
     if SEPARATE_MAPS:
         albedo_png = output_dir / (basename + "_albedo.png")
@@ -970,6 +1041,9 @@ for normal_path in TEXTURES_DIR.glob("**/*_n.dds"):
         ao_img.save(ao_png)
         metallic_img.save(metallic_png)
         roughness_img.save(roughness_png)
+        logging.info(
+            f"Saved: {albedo_png.name}, {parallax_png.name}, {ao_png.name}, {metallic_png.name}, {roughness_png.name}"
+        )
     else:
         albedo_png = output_dir / (diffuse_basename + ".png")
         rmaos_png = output_dir / (basename + "_rmaos.png")
@@ -990,6 +1064,9 @@ for normal_path in TEXTURES_DIR.glob("**/*_n.dds"):
         albedo_img.save(albedo_png)
         rmaos_image.save(rmaos_png)
         parallax_img.save(parallax_png)
+        logging.info(
+            f"Saved: {albedo_png.name}, {rmaos_png.name}, {parallax_png.name}"
+        )
 
     # Re-save normal map since we need to drop alpha channel here
     normal_img.save(normal_png)
@@ -1099,3 +1176,14 @@ for normal_path in TEXTURES_DIR.glob("**/*_n.dds"):
                 f,
                 indent=4,
             )
+        logging.info(f"Wrote JSON: {json_file}")
+
+    processed_ok += 1
+
+# Print summary and keep console open if we allocated it
+summary = (
+    f"\nCompleted. Found: {total_found}, OK: {processed_ok}, "
+    f"Failed: {processed_fail}, Skipped (no diffuse): {skipped_missing_diffuse}.\n"
+    f"Output root: {OUTPUT_DIR}"
+)
+maybe_pause_on_exit(summary)
