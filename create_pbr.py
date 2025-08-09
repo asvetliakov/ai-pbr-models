@@ -2,6 +2,7 @@ import argparse
 import sys
 import os
 import torch
+import json
 from torchvision.transforms import functional as TF
 import torch.nn.functional as F
 from torch.amp.autocast_mode import autocast
@@ -38,14 +39,14 @@ parser.add_argument(
     "--input_dir",
     type=str,
     required=True,
-    help="Directory containing input images",
+    help='Directory containing input images (must contain "textures" folder)',
 )
 
 parser.add_argument(
     "--output_dir",
     type=str,
     required=True,
-    help="Directory to save output images",
+    help="Directory to save output images. Will create PBR subdirectory automatically",
 )
 
 parser.add_argument(
@@ -99,6 +100,13 @@ parser.add_argument(
     default="s4",
 )
 
+parser.add_argument(
+    "--create_jsons",
+    type=bool,
+    default=True,
+    help="If true, creates PGPatcher's JSON files.",
+)
+
 
 # --- Optional GUI when no CLI args are provided ---
 def ensure_console():
@@ -140,13 +148,14 @@ def launch_gui_and_get_args() -> argparse.Namespace:
 
     root = tk.Tk()
     root.title("Create PBR Maps")
-    root.geometry("660x460")
+    root.geometry("660x500")
 
     # Vars
     input_dir_v = tk.StringVar(value="")
     output_dir_v = tk.StringVar(value="")
     format_v = tk.StringVar(value="dds")
     separate_maps_v = tk.BooleanVar(value=False)
+    create_jsons_v = tk.BooleanVar(value=True)
     tile_size_v = tk.IntVar(value=2048)
     segformer_v = tk.StringVar(value="s4")
     has_cuda = bool(torch.cuda.is_available())
@@ -176,7 +185,7 @@ def launch_gui_and_get_args() -> argparse.Namespace:
         row=0, column=2, sticky="e"
     )
     make_desc(
-        frm, "Folder containing input textures (pairs *_n.dds and *_d.dds or .dds)"
+        frm, "Folder containing input textures (must contain 'textures' folder)"
     ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(2, 8))
 
     # Output dir
@@ -230,11 +239,42 @@ def launch_gui_and_get_args() -> argparse.Namespace:
         "Processing tile size. If you don't have enough VRAM and have OOM(out of memory) errors OR your textures are in 2K, you can set this to 1024. Otherwise leave to 2048.",
     ).grid(row=9, column=1, columnspan=2, sticky="w", pady=(2, 8))
 
+    # Create JSONs
+    json_chk = ttk.Checkbutton(
+        frm, text="Create PGPatcher JSON files", variable=create_jsons_v
+    )
+    json_chk.grid(row=10, column=1, sticky="w")
+    make_desc(
+        frm,
+        "Generate JSON files compatible with PGPatcher inside the PBR output tree. Ignored when 'Separate maps' is enabled.",
+    ).grid(row=11, column=1, columnspan=2, sticky="w", pady=(2, 8))
+
+    # Keep JSON option disabled when separate maps is on
+    def _sync_json_option(*_):
+        if separate_maps_v.get() or format_v.get().lower() == "png":
+            create_jsons_v.set(False)
+            try:
+                json_chk.state(["disabled"])  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        else:
+            try:
+                json_chk.state(["!disabled"])  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+    try:
+        separate_maps_v.trace_add("write", _sync_json_option)  # type: ignore[attr-defined]
+        format_v.trace_add("write", _sync_json_option)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    _sync_json_option()
+
     # Segformer checkpoint
     seg_lbl = ttk.Label(frm, text="Segmentation")
-    seg_lbl.grid(row=10, column=0, sticky="w")
+    seg_lbl.grid(row=12, column=0, sticky="w")
     seg_box = ttk.Frame(frm)
-    seg_box.grid(row=10, column=1, sticky="w")
+    seg_box.grid(row=12, column=1, sticky="w")
     for lab in ("s4", "s4_alt"):
         ttk.Radiobutton(seg_box, text=lab, variable=segformer_v, value=lab).pack(
             side=tk.LEFT
@@ -242,13 +282,13 @@ def launch_gui_and_get_args() -> argparse.Namespace:
     make_desc(
         frm,
         "EXPERIMENTAL. Choose the model variant for material segmentation. S4 is the most robust. If there is mislabeling metallic with other materials you can try s4_alt to see if it solves your issue.",
-    ).grid(row=11, column=1, columnspan=2, sticky="w", pady=(2, 8))
+    ).grid(row=13, column=1, columnspan=2, sticky="w", pady=(2, 8))
 
     # Device selection
     dev_lbl = ttk.Label(frm, text="Compute Device")
-    dev_lbl.grid(row=12, column=0, sticky="w")
+    dev_lbl.grid(row=14, column=0, sticky="w")
     dev_box = ttk.Frame(frm)
-    dev_box.grid(row=12, column=1, sticky="w")
+    dev_box.grid(row=14, column=1, sticky="w")
     ttk.Radiobutton(dev_box, text="CPU", variable=device_v, value="cpu").pack(
         side=tk.LEFT
     )
@@ -258,17 +298,24 @@ def launch_gui_and_get_args() -> argparse.Namespace:
     cuda_rb.pack(side=tk.LEFT)
     make_desc(
         frm, "Use CUDA GPU when available for faster processing; otherwise use CPU."
-    ).grid(row=13, column=1, columnspan=2, sticky="w", pady=(2, 8))
+    ).grid(row=15, column=1, columnspan=2, sticky="w", pady=(2, 8))
 
     # Actions
     btns = ttk.Frame(frm)
-    btns.grid(row=14, column=0, columnspan=3, sticky="e", pady=(12, 0))
+    btns.grid(row=16, column=0, columnspan=3, sticky="e", pady=(12, 0))
 
     result: dict[str, object] = {"ok": False, "ns": None}
 
     def on_run():
         if not input_dir_v.get() or not Path(input_dir_v.get()).exists():
             messagebox.showerror("Error", "Please select a valid input directory")
+            return
+        textures_dir = Path(input_dir_v.get()) / "textures"
+        if not textures_dir.is_dir():
+            messagebox.showerror(
+                "Error",
+                "Selected input directory must contain a 'textures' folder.",
+            )
             return
         if not output_dir_v.get():
             messagebox.showerror("Error", "Please select an output directory")
@@ -283,6 +330,7 @@ def launch_gui_and_get_args() -> argparse.Namespace:
             cpu=(device_v.get() == "cpu"),
             format=fmt,
             separate_maps=bool(separate_maps_v.get()),
+            create_jsons=bool(create_jsons_v.get()),
             textconv_path=str((Path(BASE_DIR) / "texconv.exe").resolve()),
             max_tile_size=int(tile_size_v.get()),
             segformer_checkpoint=segformer_v.get(),
@@ -322,12 +370,23 @@ print(f"Using device: {device}")
 
 INPUT_DIR = Path(args.input_dir).resolve()
 BASE_OUTPUT_DIR = Path(args.output_dir).resolve()
+OUTPUT_DIR = BASE_OUTPUT_DIR / "textures" / "PBR"
 TEXCONV_PATH = Path(args.textconv_path).resolve()
 OUTPUT_PNG = args.format.lower() == "png" or args.separate_maps
 SEPARATE_MAPS = args.separate_maps
 MAX_TILE_SIZE = args.max_tile_size
 WEIGHTS_DIR = Path(args.weights_dir).resolve()
 SEGFORMER_STAGE = args.segformer_checkpoint
+CREATE_JSONS = False if SEPARATE_MAPS else args.create_jsons
+
+# Validate input structure and compute scan root
+TEXTURES_DIR = INPUT_DIR / "textures"
+if not TEXTURES_DIR.is_dir():
+    print(
+        f"Error: input_dir '{INPUT_DIR}' must contain a 'textures' folder.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 TEXCONV_ARGS_SRGB_PNG = [
     str(TEXCONV_PATH),
@@ -403,7 +462,7 @@ for param in unet_roughness.parameters():
     param.requires_grad = False
 unet_roughness.eval()
 
-BASE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def normalize_normal_map(normal: Image.Image) -> Image.Image:
@@ -847,8 +906,8 @@ def predirect_pbr_maps(
     )
 
 
-# Find and process normal + diffuse pairs
-for normal_path in INPUT_DIR.glob("**/*_n.dds"):
+# Find and process normal + diffuse pairs inside 'textures'
+for normal_path in TEXTURES_DIR.glob("**/*_n.dds"):
     diffuse_path = normal_path.with_name(normal_path.name.replace("_n.dds", "_d.dds"))
     if not diffuse_path.exists():
         diffuse_path = normal_path.with_name(normal_path.name.replace("_n.dds", ".dds"))
@@ -861,8 +920,8 @@ for normal_path in INPUT_DIR.glob("**/*_n.dds"):
     print(f"  Normal Map: {normal_path}")
     print(f"  Diffuse Map: {diffuse_path}")
 
-    input_relative_path = normal_path.relative_to(INPUT_DIR)
-    output_dir = BASE_OUTPUT_DIR / input_relative_path.parent
+    input_relative_path = normal_path.relative_to(TEXTURES_DIR)
+    output_dir = OUTPUT_DIR / input_relative_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Call textconv for diffuse
@@ -873,6 +932,7 @@ for normal_path in INPUT_DIR.glob("**/*_n.dds"):
     run(normal_args, check=True, stdout=DEVNULL, stderr=DEVNULL)
 
     basename = normal_path.stem.replace("_n", "")
+    diffuse_basename = diffuse_path.stem
     diffuse_png = output_dir / (diffuse_path.stem + ".png")
     normal_png = output_dir / (normal_path.stem + ".png")
 
@@ -911,7 +971,7 @@ for normal_path in INPUT_DIR.glob("**/*_n.dds"):
         metallic_img.save(metallic_png)
         roughness_img.save(roughness_png)
     else:
-        albedo_png = output_dir / (basename + ".png")
+        albedo_png = output_dir / (diffuse_basename + ".png")
         rmaos_png = output_dir / (basename + "_rmaos.png")
         parallax_png = output_dir / (basename + "_p.png")
 
@@ -1011,3 +1071,31 @@ for normal_path in INPUT_DIR.glob("**/*_n.dds"):
         ]
         run(normal_args, check=True, stdout=DEVNULL, stderr=DEVNULL)
         normal_png.unlink(missing_ok=True)
+
+    if CREATE_JSONS:
+        json_base_dir = BASE_OUTPUT_DIR / "PBRNifPatcher"
+        json_base_dir.mkdir(parents=True, exist_ok=True)
+        json_dir = json_base_dir / input_relative_path.parent
+        json_dir.mkdir(parents=True, exist_ok=True)
+        json_file = json_dir / (diffuse_basename + ".json")
+
+        with open(json_file, "w") as f:
+            json.dump(
+                [
+                    {
+                        "texture": str(input_relative_path.parent / diffuse_basename),
+                        "emissive": False,
+                        "parallax": True,
+                        "subsurface_foliage": False,
+                        "subsurface": False,
+                        "specular_level": 0.04,
+                        "subsurface_color": [1, 1, 1],
+                        "roughness_scale": 1,
+                        "subsurface_opacity": 1,
+                        "smooth_angle": 75,
+                        "displacement_scale": 1,
+                    }
+                ],
+                f,
+                indent=4,
+            )
