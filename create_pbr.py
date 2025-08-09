@@ -1,4 +1,5 @@
 import argparse
+import sys
 import torch
 from torchvision.transforms import functional as TF
 import torch.nn.functional as F
@@ -18,7 +19,13 @@ from training_scripts.class_materials import CLASS_LIST, CLASS_PALETTE
 from training_scripts.segformer_6ch import create_segformer
 from training_scripts.unet_models import UNetAlbedo, UNetSingleChannel
 
-BASE_DIR = Path(__file__).resolve().parent
+# Resolve base directory correctly for both script and PyInstaller executable runs.
+if getattr(sys, "frozen", False):
+    # Running as a bundled executable (PyInstaller)
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    # Running from source
+    BASE_DIR = Path(__file__).resolve().parent
 WEIGHTS_DIR = (BASE_DIR / "stored_weights").resolve()
 
 parser = argparse.ArgumentParser(description="Create PBR from diffuse + normal")
@@ -69,7 +76,7 @@ parser.add_argument(
 parser.add_argument(
     "--textconv_path",
     type=str,
-    default="texconv.exe",
+    default=str((Path(BASE_DIR) / "texconv.exe").resolve()),
     help="Path to the texconv executable",
 )
 
