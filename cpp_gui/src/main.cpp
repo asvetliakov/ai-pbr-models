@@ -11,6 +11,7 @@
 #include <chrono>
 #include <mutex>
 #include <optional>
+#include <cwchar>
 
 // TorchScript
 #include <torch/script.h>
@@ -48,6 +49,37 @@ static std::atomic<bool> g_isRunning{false};
 static std::atomic<int> g_progressValue{0};
 static std::atomic<int> g_progressMax{100};
 static std::mutex g_logMutex;
+static bool g_consoleReady = false;
+
+// Console logging helpers
+void InitConsole()
+{
+    if (g_consoleReady)
+        return;
+    if (AllocConsole())
+    {
+        // Optional: set a title
+        SetConsoleTitleW(L"AI PBR GUI Log");
+        g_consoleReady = true;
+    }
+}
+
+void LogMsg(const std::wstring &msg, int indent = 0)
+{
+    if (!g_consoleReady)
+        return;
+    std::scoped_lock lk(g_logMutex);
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h == NULL || h == INVALID_HANDLE_VALUE)
+        return;
+    std::wstring line;
+    if (indent > 0)
+        line.assign(indent * 2, L' ');
+    line += msg;
+    DWORD written = 0;
+    WriteConsoleW(h, line.c_str(), (DWORD)line.size(), &written, NULL);
+    WriteConsoleW(h, L"\r\n", 2, &written, NULL);
+}
 
 // Config similar to Python
 static int MAX_TILE_SIZE = 2048; // adjustable
@@ -100,6 +132,7 @@ void RunTexconv(const std::wstring &cmd)
     PROCESS_INFORMATION pi = {};
 
     std::wstring cmdCopy = cmd; // CreateProcess may modify the string
+    LogMsg(L"[texconv] " + cmdCopy, 2);
     if (!CreateProcessW(NULL, &cmdCopy[0], NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
     {
         CloseHandle(hStdoutRead);
@@ -146,6 +179,10 @@ void RunTexconv(const std::wstring &cmd)
             error += "\nStdout: " + stdout_output;
         throw std::runtime_error(error);
     }
+    else
+    {
+        LogMsg(L"[texconv] done", 2);
+    }
 }
 
 // Resolve texconv.exe or exit fatally
@@ -167,7 +204,10 @@ std::filesystem::path EnsureReadableImage(const std::filesystem::path &inPath, b
     for (auto &ch : ext)
         ch = (wchar_t)towlower(ch);
     if (ext != L".dds")
+    {
+        LogMsg(L"Using image as-is: " + inPath.wstring(), 1);
         return inPath;
+    }
 
     auto texconv = GetTexconvOrExit();
     auto tmpDir = GetTempDir() / L"ai_pbr_texconv";
@@ -184,11 +224,13 @@ std::filesystem::path EnsureReadableImage(const std::filesystem::path &inPath, b
         cmd += L"-f R8G8B8A8_UNORM ";
     cmd += L"\"" + inPath.wstring() + L"\"";
 
+    LogMsg(std::wstring(L"Converting DDS to PNG [") + (isSRGB ? L"sRGB" : L"linear") + L"]: " + inPath.wstring(), 1);
     RunTexconv(cmd);
 
     auto png = tmpDir / (inPath.stem().wstring() + L".png");
     if (!std::filesystem::exists(png))
         throw std::runtime_error("texconv did not produce expected PNG output");
+    LogMsg(L"Converted: " + png.wstring(), 1);
     return png;
 }
 
@@ -535,6 +577,7 @@ at::Tensor runAlbedoTiled(torch::jit::Module &unet_albedo,
     int overlap = 0;
     std::vector<int> xs{0}, ys{0};
     bool useTiling = (W != H) || (tile < std::min(H, W));
+    LogMsg(L"Albedo stage: " + std::to_wstring(W) + L"x" + std::to_wstring(H) + L", tile=" + std::to_wstring(tile) + (useTiling ? L" (tiling)" : L" (single tile)"), 1);
     if (useTiling)
     {
         overlap = tile / 8;
@@ -619,6 +662,7 @@ at::Tensor runAlbedoTiled(torch::jit::Module &unet_albedo,
 
     if (overlap > 0)
         out = out / weight.clamp_min(1e-6);
+    LogMsg(L"Albedo predicted", 1);
     return out.squeeze(0);
 }
 
@@ -653,6 +697,7 @@ void runPBR(const Models &M,
     {
         cv::resize(albedo, albedo, cv::Size(), 0.5, 0.5, cv::INTER_LANCZOS4);
         downsampleFactor *= 2;
+        LogMsg(L"Downscale albedo x0.5 (<=1024) -> " + std::to_wstring(albedo.cols) + L"x" + std::to_wstring(albedo.rows), 2);
     }
     albedoH = albedo.rows, albedoW = albedo.cols;
     if (std::max(albedoW, albedoH) > MAX_TILE_SIZE)
@@ -667,12 +712,14 @@ void runPBR(const Models &M,
 
         cv::resize(albedo, albedo, cv::Size(newW, newH), 0, 0, cv::INTER_LANCZOS4);
         downsampleFactor *= factor;
+        LogMsg(L"Downscale albedo /" + std::to_wstring(factor) + L" (<=MAX_TILE_SIZE) -> " + std::to_wstring(newW) + L"x" + std::to_wstring(newH), 2);
     }
 
     if (albedo.rows != normal.rows || albedo.cols != normal.cols)
     {
         cv::resize(normal, normal, albedo.size(), 0, 0, cv::INTER_LINEAR);
         normal = normalizeNormalImage(normal);
+        LogMsg(L"Resize normal to match albedo -> " + std::to_wstring(normal.cols) + L"x" + std::to_wstring(normal.rows) + L" and renormalize", 2);
     }
 
     // Pad to square if needed (right/bottom)
@@ -703,6 +750,7 @@ void runPBR(const Models &M,
     // Curvature and Poisson directly from standardized normals (to mirror Python)
     auto Poisson = poissonCoarseFromNormal(normalCHW); // (1,1,H,W)
     auto Curv = meanCurvature(normalCHW);              // (1,1,H,W)
+    LogMsg(L"Computed Poisson coarse height and mean curvature", 2);
 
     // Segformer features and mask (robust to different TS export styles)
     auto seg_in = torch::cat({albedoDefaultCHW.unsqueeze(0).to(device), normalCHW.unsqueeze(0).to(device)}, 1);
@@ -740,6 +788,7 @@ void runPBR(const Models &M,
 
     at::Tensor roughness = M.unetRoughness.forward({metal_in, last_hidden}).toTensor();
     roughness = roughness.to(torch::kCPU);
+    LogMsg(L"Predicted PBR maps: parallax, AO, metallic, roughness", 2);
 
     auto to_u8_gray = [&](const at::Tensor &t1c)
     {
@@ -759,6 +808,7 @@ void runPBR(const Models &M,
     outAO = outAO(cv::Rect(0, 0, cropW, cropH));
     outMetallic = outMetallic(cv::Rect(0, 0, cropW, cropH));
     outRoughness = outRoughness(cv::Rect(0, 0, cropW, cropH));
+    LogMsg(L"Cropped outputs to " + std::to_wstring(cropW) + L"x" + std::to_wstring(cropH), 2);
 }
 
 // Process a single pair (normal, diffuse)
@@ -768,6 +818,9 @@ void processPair(const std::filesystem::path &normalPath,
                  const Models &M,
                  torch::Device device)
 {
+    LogMsg(L"Processing pair:", 0);
+    LogMsg(L"Diffuse: " + diffusePath.wstring(), 1);
+    LogMsg(L"Normal:  " + normalPath.wstring(), 1);
     // Load images
     // Use texconv to convert DDS to PNG with correct color spaces (sRGB for diffuse, linear for normals)
     auto dPath = EnsureReadableImage(diffusePath, /*isSRGB=*/true);
@@ -786,13 +839,16 @@ void processPair(const std::filesystem::path &normalPath,
     {
         throw std::runtime_error("Failed to load input images (diffuse/normal)");
     }
+    LogMsg(L"Loaded: diffuse=" + std::to_wstring(diffuse.cols) + L"x" + std::to_wstring(diffuse.rows) + L", normal=" + std::to_wstring(normal.cols) + L"x" + std::to_wstring(normal.rows), 1);
 
     // Resize normal to diffuse size if needed, and renormalize
     if (normal.cols != diffuse.cols || normal.rows != diffuse.rows)
     {
         cv::resize(normal, normal, diffuse.size(), 0, 0, cv::INTER_LINEAR);
+        LogMsg(L"Resized normal to diffuse size", 1);
     }
     normal = normalizeNormalImage(normal);
+    LogMsg(L"Renormalized normal map", 1);
 
     // Run albedo tiled with segformer refinement
     auto albedoCHW = runAlbedoTiled(M.unetAlbedo, M.segformer, diffuse, normal, device);
@@ -806,6 +862,7 @@ void processPair(const std::filesystem::path &normalPath,
 
     cv::Mat parallax, ao, metallic, roughness;
     runPBR(M, albedoBGR, normal, device, parallax, ao, metallic, roughness);
+    LogMsg(L"Generated PBR PNGs (parallax, AO, metallic, roughness)", 1);
 
     std::filesystem::create_directories(outDir);
     auto base = normalPath.stem().wstring();
@@ -855,6 +912,10 @@ void processPair(const std::filesystem::path &normalPath,
     cv::imwrite(ws2s(albedo_png.wstring()), albedoOut);
     cv::imwrite(ws2s(rmaos_png.wstring()), rmaos);
     cv::imwrite(ws2s(p_png.wstring()), parallax);
+    LogMsg(L"Wrote PNGs:", 1);
+    LogMsg(L"- " + albedo_png.wstring(), 2);
+    LogMsg(L"- " + rmaos_png.wstring(), 2);
+    LogMsg(L"- " + p_png.wstring(), 2);
 
     // Convert PNGs to DDS similar to Python
     auto texconv = GetTexconvOrExit();
@@ -864,14 +925,17 @@ void processPair(const std::filesystem::path &normalPath,
     std::wstring albCmd = L"\"" + texconv.wstring() + L"\" -nologo -f " + albFmt + L" -ft dds --srgb-in -y -m 0 -o \"" + outDirW + L"\" \"" + albedo_png.wstring() + L"\"";
     if (keepAlpha)
         albCmd += L" --separate-alpha";
+    LogMsg(L"Converting Albedo PNG -> DDS (" + albFmt + L")", 1);
     RunTexconv(albCmd);
 
     // RMAOS: BC1_UNORM
     std::wstring rmaosCmd = L"\"" + texconv.wstring() + L"\" -nologo -f BC1_UNORM -ft dds -y -m 0 -o \"" + outDirW + L"\" \"" + rmaos_png.wstring() + L"\"";
+    LogMsg(L"Converting RMAOS PNG -> DDS (BC1_UNORM)", 1);
     RunTexconv(rmaosCmd);
 
     // Parallax: BC4_UNORM
     std::wstring pCmd = L"\"" + texconv.wstring() + L"\" -nologo -f BC4_UNORM -ft dds -y -m 0 -o \"" + outDirW + L"\" \"" + p_png.wstring() + L"\"";
+    LogMsg(L"Converting Parallax PNG -> DDS (BC4_UNORM)", 1);
     RunTexconv(pCmd);
 
     // Normal: drop alpha and convert to BC7_UNORM
@@ -885,6 +949,7 @@ void processPair(const std::filesystem::path &normalPath,
     auto normal_png = outDir / (base + L"_n.png");
     cv::imwrite(ws2s(normal_png.wstring()), normalRGB);
     std::wstring nCmd = L"\"" + texconv.wstring() + L"\" -nologo -f BC7_UNORM -ft dds -y -m 0 -o \"" + outDirW + L"\" \"" + normal_png.wstring() + L"\"";
+    LogMsg(L"Converting Normal PNG -> DDS (BC7_UNORM)", 1);
     RunTexconv(nCmd);
 
     // Remove PNG intermediates
@@ -893,6 +958,10 @@ void processPair(const std::filesystem::path &normalPath,
     std::filesystem::remove(rmaos_png, ec);
     std::filesystem::remove(p_png, ec);
     std::filesystem::remove(normal_png, ec);
+    LogMsg(L"DDS written to: " + outDirW, 1);
+
+    // Group end
+    LogMsg(L"Pair done.", 0);
 }
 
 // Thread worker: scan input for *_n.* and corresponding diffuse files and process
@@ -933,6 +1002,8 @@ void workerRun(std::filesystem::path inDir, std::filesystem::path outDir)
 
         Models M{segformer, unetAlbedo, unetParallax, unetAO, unetMetallic, unetRoughness};
 
+        LogMsg(L"Models loaded on device: " + std::wstring(device.is_cuda() ? L"CUDA" : L"CPU"));
+        LogMsg(L"Scanning input: " + inDir.wstring());
         // Gather normal files
         std::vector<std::filesystem::path> normals;
         for (auto &p : std::filesystem::recursive_directory_iterator(inDir))
@@ -952,6 +1023,7 @@ void workerRun(std::filesystem::path inDir, std::filesystem::path outDir)
         g_progressMax = (int)normals.size();
         SendMessage(g_progress, PBM_SETRANGE, 0, MAKELPARAM(0, g_progressMax.load()));
         g_progressValue = 0;
+        LogMsg(L"Found normal maps: " + std::to_wstring(normals.size()));
 
         for (size_t i = 0; i < normals.size() && g_isRunning; ++i)
         {
@@ -972,6 +1044,7 @@ void workerRun(std::filesystem::path inDir, std::filesystem::path outDir)
 
             if (!std::filesystem::exists(diffusePath))
             {
+                LogMsg(L"Skipping: diffuse not found for normal " + normalPath.wstring());
                 std::scoped_lock lk(g_logMutex);
                 SetStatus(L"Skipping: diffuse not found for " + normalPath.wstring());
                 g_progressValue++;
@@ -1006,6 +1079,7 @@ void workerRun(std::filesystem::path inDir, std::filesystem::path outDir)
         }
 
         SetStatus(L"Done.");
+        LogMsg(L"All done.");
     }
     catch (const c10::Error &e)
     {
@@ -1096,6 +1170,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
 {
+    // Open console for logging
+    InitConsole();
+    LogMsg(L"Starting AI PBR GUI...");
     g_hInst = hInstance;
     WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
     wc.lpfnWndProc = WndProc;
