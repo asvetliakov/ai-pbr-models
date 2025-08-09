@@ -101,6 +101,8 @@ def main():
 
     img_albedo = torch.randn(1, 6, H, W, device=device)
     segfeat = torch.randn(1, 512, max(1, H // 16), max(1, W // 16), device=device)
+
+    # Trace conditional version (with segfeats)
     with torch.no_grad():
         traced_albedo = torch.jit.trace(
             unet_albedo, (img_albedo, segfeat), strict=False
@@ -108,6 +110,13 @@ def main():
     out = out_dir / "unet_albedo.ts"
     torch.jit.save(traced_albedo, str(out))
     print(f"Saved: {out}")
+
+    # Trace unconditional version (without segfeats)
+    with torch.no_grad():
+        traced_albedo_uncond = torch.jit.trace(unet_albedo, (img_albedo), strict=False)
+    out_uncond = out_dir / "unet_albedo_uncond.ts"
+    torch.jit.save(traced_albedo_uncond, str(out_uncond))
+    print(f"Saved: {out_uncond}")
 
     # --- UNet Parallax ---
     print("Tracing UNet Parallax…")

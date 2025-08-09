@@ -559,6 +559,7 @@ at::Tensor poissonCoarseFromNormal(at::Tensor normalCHW /*(3,H,W)*/)
 
 // Tiling for albedo similar to Python predict_albedo
 at::Tensor runAlbedoTiled(torch::jit::Module &unet_albedo,
+                          torch::jit::Module &unet_albedo_uncond,
                           torch::jit::Module &segformer,
                           const cv::Mat &diffuse,
                           const cv::Mat &normal,
@@ -614,16 +615,9 @@ at::Tensor runAlbedoTiled(torch::jit::Module &unet_albedo,
             auto tile_nrm = normalCHW.index({torch::indexing::Slice(), torch::indexing::Slice(y, y + tile), torch::indexing::Slice(x, x + tile)}).unsqueeze(0).to(device);
             auto albedo_in = torch::cat({tile_img, tile_nrm}, 1);
 
-            // First pass (handle 1 or 2 args)
-            at::Tensor pred1;
-            try
-            {
-                pred1 = unet_albedo.forward({albedo_in, torch::IValue()}).toTensor();
-            }
-            catch (...)
-            {
-                pred1 = unet_albedo.forward({albedo_in}).toTensor();
-            }
+            // First pass - use unconditional model (no segfeats)
+            at::Tensor pred1 = unet_albedo_uncond.forward({albedo_in}).toTensor();
+
             // Normalize for segformer default stats
             for (int c = 0; c < 3; ++c)
             {
@@ -641,6 +635,7 @@ at::Tensor runAlbedoTiled(torch::jit::Module &unet_albedo,
                 ShowFatalAndExit(L"Segformer hidden states are required but not available (albedo stage).");
             }
 
+            // Second pass - use conditional model with segmentation features
             at::Tensor pred = unet_albedo.forward({albedo_in, seg_feats}).toTensor();
             pred = pred.to(torch::kCPU);
 
@@ -670,6 +665,7 @@ struct Models
 {
     torch::jit::Module &segformer;
     torch::jit::Module &unetAlbedo;
+    torch::jit::Module &unetAlbedoUncond;
     torch::jit::Module &unetParallax;
     torch::jit::Module &unetAO;
     torch::jit::Module &unetMetallic;
@@ -851,7 +847,7 @@ void processPair(const std::filesystem::path &normalPath,
     LogMsg(L"Renormalized normal map", 1);
 
     // Run albedo tiled with segformer refinement
-    auto albedoCHW = runAlbedoTiled(M.unetAlbedo, M.segformer, diffuse, normal, device);
+    auto albedoCHW = runAlbedoTiled(M.unetAlbedo, M.unetAlbedoUncond, M.segformer, diffuse, normal, device);
     cv::Mat albedoBGR = toImageFromTensor(albedoCHW.clamp(0, 1));
 
     // Prepare inputs for PBR stage
@@ -974,10 +970,11 @@ void workerRun(std::filesystem::path inDir, std::filesystem::path outDir)
     {
         // Load TorchScript models from a conventional directory relative to exe or workspace
         // Expect files:
-        //  segformer.ts, unet_albedo.ts, unet_parallax.ts, unet_ao.ts, unet_metallic.ts, unet_roughness.ts
+        //  segformer.ts, unet_albedo.ts, unet_albedo_uncond.ts, unet_parallax.ts, unet_ao.ts, unet_metallic.ts, unet_roughness.ts
         std::filesystem::path modelRoot = std::filesystem::current_path() / "weights_ts";
         torch::jit::script::Module segformer = torch::jit::load((modelRoot / "segformer.ts").string());
         torch::jit::script::Module unetAlbedo = torch::jit::load((modelRoot / "unet_albedo.ts").string());
+        torch::jit::script::Module unetAlbedoUncond = torch::jit::load((modelRoot / "unet_albedo_uncond.ts").string());
         torch::jit::script::Module unetParallax = torch::jit::load((modelRoot / "unet_parallax.ts").string());
         torch::jit::script::Module unetAO = torch::jit::load((modelRoot / "unet_ao.ts").string());
         torch::jit::script::Module unetMetallic = torch::jit::load((modelRoot / "unet_metallic.ts").string());
@@ -989,18 +986,20 @@ void workerRun(std::filesystem::path inDir, std::filesystem::path outDir)
 
         segformer.to(device);
         unetAlbedo.to(device);
+        unetAlbedoUncond.to(device);
         unetParallax.to(device);
         unetAO.to(device);
         unetMetallic.to(device);
         unetRoughness.to(device);
         segformer.eval();
         unetAlbedo.eval();
+        unetAlbedoUncond.eval();
         unetParallax.eval();
         unetAO.eval();
         unetMetallic.eval();
         unetRoughness.eval();
 
-        Models M{segformer, unetAlbedo, unetParallax, unetAO, unetMetallic, unetRoughness};
+        Models M{segformer, unetAlbedo, unetAlbedoUncond, unetParallax, unetAO, unetMetallic, unetRoughness};
 
         LogMsg(L"Models loaded on device: " + std::wstring(device.is_cuda() ? L"CUDA" : L"CPU"));
         LogMsg(L"Scanning input: " + inDir.wstring());
