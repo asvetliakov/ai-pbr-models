@@ -1,5 +1,6 @@
 import argparse
 import sys
+import os
 import torch
 from torchvision.transforms import functional as TF
 import torch.nn.functional as F
@@ -15,6 +16,9 @@ from subprocess import run, DEVNULL
 from PIL import Image
 import kornia as K
 import numpy as np
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import tkinter.font as tkfont
 from training_scripts.class_materials import CLASS_LIST, CLASS_PALETTE
 from training_scripts.segformer_6ch import create_segformer
 from training_scripts.unet_models import UNetAlbedo, UNetSingleChannel
@@ -95,7 +99,219 @@ parser.add_argument(
     default="s4",
 )
 
-args = parser.parse_args()
+
+# --- Optional GUI when no CLI args are provided ---
+def ensure_console():
+    """On Windows, allocate a console if none is attached (useful for windowed builds)."""
+    if os.name != "nt":
+        return
+    try:
+        # If stdout is not a TTY, try to allocate a console
+        if not sys.stdout or not sys.stdout.isatty():
+            import ctypes
+
+            ctypes.windll.kernel32.AllocConsole()
+            sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+            sys.stderr = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+    except Exception:
+        pass
+
+
+def make_desc(parent, text: str) -> tk.Label:
+    """Create a small, grey, wrapped description label."""
+    lbl = tk.Label(
+        parent, text=text, justify=tk.LEFT, foreground="#666666", wraplength=520
+    )
+    try:
+        base = tkfont.nametofont("TkDefaultFont").copy()
+        base.configure(size=max(base.cget("size") - 1, 8))
+        lbl.configure(font=base)
+    except Exception:
+        pass
+    return lbl
+
+
+def launch_gui_and_get_args() -> argparse.Namespace:
+    """Launch a minimal Tkinter GUI to collect parameters and return an argparse.Namespace."""
+    if tk is None:
+        raise RuntimeError("Tkinter is not available on this system.")
+
+    ensure_console()
+
+    root = tk.Tk()
+    root.title("Create PBR Maps")
+    root.geometry("660x460")
+
+    # Vars
+    input_dir_v = tk.StringVar(value="")
+    output_dir_v = tk.StringVar(value="")
+    format_v = tk.StringVar(value="dds")
+    separate_maps_v = tk.BooleanVar(value=False)
+    tile_size_v = tk.IntVar(value=2048)
+    segformer_v = tk.StringVar(value="s4")
+    has_cuda = bool(torch.cuda.is_available())
+    device_v = tk.StringVar(value=("cuda" if has_cuda else "cpu"))
+
+    # Handlers
+    def browse_input():
+        d = filedialog.askdirectory(title="Select input directory")
+        if d:
+            input_dir_v.set(d)
+
+    def browse_output():
+        d = filedialog.askdirectory(title="Select output directory")
+        if d:
+            output_dir_v.set(d)
+
+    # Layout
+    frm = ttk.Frame(root)
+    frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+
+    # Input dir
+    lbl_input = ttk.Label(frm, text="Input directory:")
+    lbl_input.grid(row=0, column=0, sticky="w")
+    in_entry = ttk.Entry(frm, textvariable=input_dir_v, width=48)
+    in_entry.grid(row=0, column=1, sticky="we")
+    ttk.Button(frm, text="Browse...", command=browse_input).grid(
+        row=0, column=2, sticky="e"
+    )
+    make_desc(
+        frm, "Folder containing input textures (pairs *_n.dds and *_d.dds or .dds)"
+    ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(2, 8))
+
+    # Output dir
+    lbl_output = ttk.Label(frm, text="Output directory:")
+    lbl_output.grid(row=2, column=0, sticky="w")
+    out_entry = ttk.Entry(frm, textvariable=output_dir_v, width=48)
+    out_entry.grid(row=2, column=1, sticky="we")
+    ttk.Button(frm, text="Browse...", command=browse_output).grid(
+        row=2, column=2, sticky="e"
+    )
+    make_desc(frm, "Where generated maps will be written.").grid(
+        row=3, column=1, columnspan=2, sticky="w", pady=(2, 8)
+    )
+
+    # Format
+    format_lbl = ttk.Label(frm, text="Format:")
+    format_lbl.grid(row=4, column=0, sticky="w")
+    fmt_box = ttk.Frame(frm)
+    fmt_box.grid(row=4, column=1, sticky="w")
+    ttk.Radiobutton(fmt_box, text="DDS", variable=format_v, value="dds").pack(
+        side=tk.LEFT
+    )
+    ttk.Radiobutton(fmt_box, text="PNG", variable=format_v, value="png").pack(
+        side=tk.LEFT
+    )
+    make_desc(
+        frm,
+        "DDS writes GPU-compressed textures via texconv; PNG writes standard .png files.",
+    ).grid(row=5, column=1, columnspan=2, sticky="w", pady=(2, 8))
+
+    # Separate maps
+    sep_chk = ttk.Checkbutton(
+        frm, text="Save separate maps (forces PNG)", variable=separate_maps_v
+    )
+    sep_chk.grid(row=6, column=1, sticky="w")
+    make_desc(
+        frm, "Saves Albedo, Roughness, Metallic, AO, and Parallax as individual images."
+    ).grid(row=7, column=1, columnspan=2, sticky="w", pady=(2, 8))
+
+    # Tile size
+    tile_lbl = ttk.Label(frm, text="Tile size:")
+    tile_lbl.grid(row=8, column=0, sticky="w")
+    tile_box = ttk.Frame(frm)
+    tile_box.grid(row=8, column=1, sticky="w")
+    for sz in (1024, 2048):
+        ttk.Radiobutton(tile_box, text=str(sz), variable=tile_size_v, value=sz).pack(
+            side=tk.LEFT
+        )
+    make_desc(
+        frm,
+        "Processing tile size. If you don't have enough VRAM and have OOM(out of memory) errors OR your textures are in 2K, you can set this to 1024. Otherwise leave to 2048.",
+    ).grid(row=9, column=1, columnspan=2, sticky="w", pady=(2, 8))
+
+    # Segformer checkpoint
+    seg_lbl = ttk.Label(frm, text="Segmentation")
+    seg_lbl.grid(row=10, column=0, sticky="w")
+    seg_box = ttk.Frame(frm)
+    seg_box.grid(row=10, column=1, sticky="w")
+    for lab in ("s4", "s4_alt"):
+        ttk.Radiobutton(seg_box, text=lab, variable=segformer_v, value=lab).pack(
+            side=tk.LEFT
+        )
+    make_desc(
+        frm,
+        "EXPERIMENTAL. Choose the model variant for material segmentation. S4 is the most robust. If there is mislabeling metallic with other materials you can try s4_alt to see if it solves your issue.",
+    ).grid(row=11, column=1, columnspan=2, sticky="w", pady=(2, 8))
+
+    # Device selection
+    dev_lbl = ttk.Label(frm, text="Compute Device")
+    dev_lbl.grid(row=12, column=0, sticky="w")
+    dev_box = ttk.Frame(frm)
+    dev_box.grid(row=12, column=1, sticky="w")
+    ttk.Radiobutton(dev_box, text="CPU", variable=device_v, value="cpu").pack(
+        side=tk.LEFT
+    )
+    cuda_rb = ttk.Radiobutton(dev_box, text="CUDA", variable=device_v, value="cuda")
+    if not has_cuda:
+        cuda_rb.state(["disabled"])  # disable if CUDA not available
+    cuda_rb.pack(side=tk.LEFT)
+    make_desc(
+        frm, "Use CUDA GPU when available for faster processing; otherwise use CPU."
+    ).grid(row=13, column=1, columnspan=2, sticky="w", pady=(2, 8))
+
+    # Actions
+    btns = ttk.Frame(frm)
+    btns.grid(row=14, column=0, columnspan=3, sticky="e", pady=(12, 0))
+
+    result: dict[str, object] = {"ok": False, "ns": None}
+
+    def on_run():
+        if not input_dir_v.get() or not Path(input_dir_v.get()).exists():
+            messagebox.showerror("Error", "Please select a valid input directory")
+            return
+        if not output_dir_v.get():
+            messagebox.showerror("Error", "Please select an output directory")
+            return
+        # If separate maps, force PNG
+        fmt = "png" if separate_maps_v.get() else format_v.get()
+        result["ok"] = True
+        result["ns"] = argparse.Namespace(
+            input_dir=input_dir_v.get(),
+            output_dir=output_dir_v.get(),
+            weights_dir=str(WEIGHTS_DIR),
+            cpu=(device_v.get() == "cpu"),
+            format=fmt,
+            separate_maps=bool(separate_maps_v.get()),
+            textconv_path=str((Path(BASE_DIR) / "texconv.exe").resolve()),
+            max_tile_size=int(tile_size_v.get()),
+            segformer_checkpoint=segformer_v.get(),
+        )
+        root.destroy()
+
+    def on_cancel():
+        result.update(ok=False)
+        root.destroy()
+
+    ttk.Button(btns, text="Run", command=on_run).pack(side=tk.RIGHT, padx=6)
+    ttk.Button(btns, text="Cancel", command=on_cancel).pack(side=tk.RIGHT)
+
+    # Grid config
+    frm.columnconfigure(1, weight=1)
+
+    root.mainloop()
+
+    if not bool(result.get("ok")):
+        sys.exit(0)
+    return result["ns"]  # type: ignore[return-value]
+
+
+if len(sys.argv) <= 1:
+    # GUI mode
+    args = launch_gui_and_get_args()
+else:
+    # CLI mode
+    args = parser.parse_args()
 device = (
     torch.device("cuda")
     if not args.cpu and torch.cuda.is_available()
@@ -326,7 +542,7 @@ def predict_albedo(diffuse_img: Image.Image, normal_img: Image.Image) -> Image.I
     # Normalize diffuse & normal image to be the same resolution, use diffuse as base
     W, H = diffuse_img.size
     if normal_img.size != (W, H):
-        print(f"Resizing normal from {normal_img.size} to {(W, H)}")
+        # print(f"Resizing normal from {normal_img.size} to {(W, H)}")
         normal_img = normal_img.resize((W, H), Image.Resampling.BILINEAR)
         normal_img = normalize_normal_map(normal_img)
 
