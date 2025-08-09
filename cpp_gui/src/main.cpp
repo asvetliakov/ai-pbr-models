@@ -223,7 +223,7 @@ std::optional<std::wstring> PickFolder(HWND owner)
 
 void SetStatus(const std::wstring &msg)
 {
-    SendMessage(g_status, WM_SETTEXT, 0, (LPARAM)msg.c_str());
+    SendMessageW(g_status, WM_SETTEXT, 0, (LPARAM)msg.c_str());
 }
 
 // Torch helpers
