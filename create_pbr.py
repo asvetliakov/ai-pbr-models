@@ -139,6 +139,7 @@ def ensure_console():
 
 # Track if we created a console window
 _CONSOLE_WAS_ALLOCATED = False
+_ALWAYS_PAUSE_ON_EXIT = False  # set True in GUI mode or via env
 
 
 def maybe_pause_on_exit(summary: str | None = None) -> None:
@@ -146,7 +147,14 @@ def maybe_pause_on_exit(summary: str | None = None) -> None:
     try:
         if summary:
             logging.info(summary)
-        if os.name == "nt" and globals().get("_CONSOLE_WAS_ALLOCATED", False):
+        must_pause = False
+        if os.name == "nt":
+            must_pause = bool(
+                globals().get("_CONSOLE_WAS_ALLOCATED", False)
+                or globals().get("_ALWAYS_PAUSE_ON_EXIT", False)
+                or os.environ.get("PBR_ALWAYS_PAUSE") == "1"
+            )
+        if must_pause:
             print("\nPress Enter to exit...")
             try:
                 input()
@@ -387,6 +395,7 @@ def launch_gui_and_get_args() -> argparse.Namespace:
 
 if len(sys.argv) <= 1:
     # GUI mode
+    _ALWAYS_PAUSE_ON_EXIT = True
     args = launch_gui_and_get_args()
 else:
     # CLI mode
