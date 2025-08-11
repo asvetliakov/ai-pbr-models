@@ -983,21 +983,44 @@ def predirect_pbr_maps(
 
 
 # Find and process normal + diffuse pairs inside 'textures'
-file_list = sorted(TEXTURES_DIR.glob("**/*_n.dds"))
-total_found = len(file_list)
+file_list_n = list(TEXTURES_DIR.glob("**/*_n.dds"))
+file_list_norm = list(TEXTURES_DIR.glob("**/*_norm.dds"))
+file_list_normal = list(TEXTURES_DIR.glob("**/*_normal.dds"))
+final_list = sorted(file_list_n + file_list_norm + file_list_normal)
+total_found = len(final_list)
 processed_ok = 0
 processed_fail = 0
 skipped_missing_diffuse = 0
 
 logging.info(f"Scanning '{TEXTURES_DIR}' for normal maps: found {total_found}")
 
-for normal_path in file_list:
-    diffuse_path = normal_path.with_name(normal_path.name.replace("_n.dds", "_d.dds"))
+for normal_path in final_list:
+    basename = normal_path.stem
+    if basename.endswith("_n"):
+        basename = basename[:-2]
+    elif basename.endswith("_norm"):
+        basename = basename[:-5]
+    elif basename.endswith("_normal"):
+        basename = basename[:-7]
+
+    diffuse_path = normal_path.with_name(basename + "_d.dds")
     if not diffuse_path.exists():
-        diffuse_path = normal_path.with_name(normal_path.name.replace("_n.dds", ".dds"))
+        diffuse_path = normal_path.with_name(basename + ".dds")
+    if not diffuse_path.exists():
+        diffuse_path = normal_path.with_name(basename + "_diff.dds")
+    if not diffuse_path.exists():
+        diffuse_path = normal_path.with_name(basename + "_diffuse.dds")
+
+    glow_path = normal_path.with_name(basename + "_g.dds")
+    if not glow_path.exists():
+        glow_path = normal_path.with_name(basename + "_glow.dds")
+    if not glow_path.exists():
+        glow_path = None
 
     if not diffuse_path.exists():
-        logging.warning(f"Skipping {normal_path} - diffuse not found (_d.dds or .dds)")
+        logging.warning(
+            f"Skipping {normal_path} - diffuse not found (_d.dds .dds _diff.dds _diffuse.dds)"
+        )
         skipped_missing_diffuse += 1
         continue
 
@@ -1021,7 +1044,6 @@ for normal_path in file_list:
         processed_fail += 1
         continue
 
-    basename = normal_path.stem.replace("_n", "")
     diffuse_basename = diffuse_path.stem
     diffuse_png = output_dir / (diffuse_path.stem + ".png")
     normal_png = output_dir / (normal_path.stem + ".png")
@@ -1075,7 +1097,7 @@ for normal_path in file_list:
             f"Saved: {albedo_png.name}, {parallax_png.name}, {ao_png.name}, {metallic_png.name}, {roughness_png.name}"
         )
     else:
-        albedo_png = output_dir / (diffuse_basename + ".png")
+        albedo_png = output_dir / (basename + ".png")
         rmaos_png = output_dir / (basename + "_rmaos.png")
         parallax_png = output_dir / (basename + "_p.png")
 
@@ -1097,13 +1119,14 @@ for normal_path in file_list:
         logging.info(f"Saved: {albedo_png.name}, {rmaos_png.name}, {parallax_png.name}")
 
     # Re-save normal map since we need to drop alpha channel here
-    normal_img.save(normal_png)
+    normal_out_png = output_dir / (basename + "_n.png")
+    normal_img.save(normal_out_png)
 
     if not OUTPUT_PNG:
         albedo_dds = albedo_png.with_suffix(".dds")
         rmaos_dds = rmaos_png.with_suffix(".dds")
         parallax_dds = parallax_png.with_suffix(".dds")
-        normal_dds = normal_png.with_suffix(".dds")
+        normal_dds = normal_out_png.with_suffix(".dds")
 
         albedo_args = [
             str(TEXCONV_PATH),
@@ -1172,10 +1195,17 @@ for normal_path in file_list:
             "0",
             "-o",
             str(output_dir),
-            str(normal_png),
+            str(normal_out_png),
         ]
         run(normal_args, check=True, stdout=DEVNULL, stderr=DEVNULL)
-        normal_png.unlink(missing_ok=True)
+        normal_out_png.unlink(missing_ok=True)
+
+        # Copy glow texture to output
+        if glow_path and glow_path.exists():
+            glow_dds_out = output_dir / (basename + "_g.dds")
+            # Copy glow texture to output
+            glow_dds_out.write_bytes(glow_path.read_bytes())
+            logging.info(f"Copied glow texture: {glow_dds_out.name}")
 
     if CREATE_JSONS:
         json_base_dir = BASE_OUTPUT_DIR / "PBRNifPatcher"
@@ -1184,23 +1214,25 @@ for normal_path in file_list:
         json_dir.mkdir(parents=True, exist_ok=True)
         json_file = json_dir / (diffuse_basename + ".json")
 
+        json_data = {
+            "texture": str(input_relative_path.parent / diffuse_basename),
+            "emissive": glow_path is not None and glow_path.exists(),
+            "parallax": True,
+            "subsurface_foliage": False,
+            "subsurface": False,
+            "specular_level": 0.04,
+            "subsurface_color": [1, 1, 1],
+            "roughness_scale": 1,
+            "subsurface_opacity": 1,
+            "smooth_angle": 75,
+            "displacement_scale": 1,
+        }
+        if basename != diffuse_basename:
+            json_data["rename"] = str(input_relative_path.parent / basename)
+
         with open(json_file, "w") as f:
             json.dump(
-                [
-                    {
-                        "texture": str(input_relative_path.parent / diffuse_basename),
-                        "emissive": False,
-                        "parallax": True,
-                        "subsurface_foliage": False,
-                        "subsurface": False,
-                        "specular_level": 0.04,
-                        "subsurface_color": [1, 1, 1],
-                        "roughness_scale": 1,
-                        "subsurface_opacity": 1,
-                        "smooth_angle": 75,
-                        "displacement_scale": 1,
-                    }
-                ],
+                [json_data],
                 f,
                 indent=4,
             )
