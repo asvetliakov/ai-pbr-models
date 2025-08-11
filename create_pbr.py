@@ -693,14 +693,6 @@ def predict_albedo(diffuse_img: Image.Image, normal_img: Image.Image) -> Image.I
     # Create blending mask (raised cosine window) - avoid zero weights at edges
     eps = 1e-3
     ramp = torch.linspace(eps, 1.0, overlap)
-    window1d = torch.ones(tile_size)
-
-    if overlap > 0:
-        window1d[:overlap] = ramp
-        window1d[-overlap:] = torch.flip(ramp, dims=[0])
-
-    # Ensure no zeros on borders so single-edge tiles still contribute fully after normalization
-    window1d = window1d.clamp_min(eps)
 
     # Precompute nothing here; we'll build per-tile windows that only taper where a neighbor exists
 
