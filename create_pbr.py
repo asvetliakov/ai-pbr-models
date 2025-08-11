@@ -690,16 +690,19 @@ def predict_albedo(diffuse_img: Image.Image, normal_img: Image.Image) -> Image.I
     albedo_output = torch.zeros(1, 3, H, W)  # (B, C, H, W)
     weight_albedo = torch.zeros_like(albedo_output)  # (B, C, H, W)
 
-    # Create blending mask (raised cosine window) - keep on CPU initially
-    ramp = torch.linspace(0, 1, overlap)
+    # Create blending mask (raised cosine window) - avoid zero weights at edges
+    eps = 1e-3
+    ramp = torch.linspace(eps, 1.0, overlap)
     window1d = torch.ones(tile_size)
 
     if overlap > 0:
         window1d[:overlap] = ramp
-        window1d[-overlap:] = ramp.flip(0)
+        window1d[-overlap:] = torch.flip(ramp, dims=[0])
 
-    # Make 2d blending mask
-    w2d = window1d[None, None, :, None] * window1d[None, None, None, :]
+    # Ensure no zeros on borders so single-edge tiles still contribute fully after normalization
+    window1d = window1d.clamp_min(eps)
+
+    # Precompute nothing here; we'll build per-tile windows that only taper where a neighbor exists
 
     num_tiles = len(xs) * len(ys)
     if num_tiles > 1:
@@ -739,7 +742,25 @@ def predict_albedo(diffuse_img: Image.Image, normal_img: Image.Image) -> Image.I
                 predicted_albedo = predicted_albedo.cpu().float()
 
                 if overlap > 0:
-                    w2d_cpu = w2d.float()
+                    # Build per-tile 1D windows: only taper if a neighbor exists on that side
+                    wx = torch.ones(tile_size)
+                    wy = torch.ones(tile_size)
+                    # Horizontal neighbors
+                    if x > 0:
+                        wx[:overlap] = ramp
+                    if x + tile_size < W:
+                        wx[-overlap:] = torch.flip(ramp, dims=[0])
+                    # Vertical neighbors
+                    if y > 0:
+                        wy[:overlap] = ramp
+                    if y + tile_size < H:
+                        wy[-overlap:] = torch.flip(ramp, dims=[0])
+                    # Guard against zeros
+                    wx = wx.clamp_min(eps)
+                    wy = wy.clamp_min(eps)
+                    w2d_cpu = (
+                        wy[None, None, :, None] * wx[None, None, None, :]
+                    ).float()
                     albedo_output[:, :, y : y + tile_size, x : x + tile_size] += (
                         predicted_albedo * w2d_cpu
                     )
